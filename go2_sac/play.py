@@ -109,9 +109,8 @@ def play_viewer(model, env_cfg, episodes, verbose=True):
                     f"{'成功' if info['success'] else '未成功'}"
                 )
 
-    # 这台机器上 glfwTerminate() 在 Wayland 下会段错误（用一个最小模型单独测也能复现，
-    # 与本文件无关），而且发生在窗口关掉、结果都打印完之后，只会留下一句"核心转储"吓人。
-    # 所以主动按正常退出码结束进程。上面的 print 都已经 flush，不会丢输出。
+    # 绕过 glfwTerminate() 的段错误：主动按正常退出码结束进程（见 AGENT.md §5-E5）。
+    # 上面的 print 都已经 flush，不会丢输出。
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(0)
@@ -138,8 +137,7 @@ def build_obs_from_state(q, dq, quat, gyro, cmd_vx, prev_action, q_default):
 def play_dds(model, env_cfg, args):
     """把策略通过 DDS 下发到 unitree_mujoco 仿真（或真机）。
 
-    注意：DDS 的 LowState 里没有 rpy、没有 base 高度、没有 foot_force
-    （仿真里这几个字段恒为 0），所以这里一律从四元数自己算，绝不读 rpy。
+    姿态一律从四元数自己算，不读 rpy / base 高度 / foot_force（见 AGENT.md §4.4）。
     """
     sys.path.insert(0, str(CTRL_DIR))
     from go2_ctrl import Q_MAX, Q_MIN, Go2Ctrl

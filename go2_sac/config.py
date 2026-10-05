@@ -32,8 +32,7 @@ SIM_DT = 0.005
 DECIMATION = 4
 
 # 关节 PD 增益。这两个值在 DDS(200 Hz) 和直接步进(500 Hz) 两条路径上都实测稳定：
-# 站立 z≈0.268 m、|dq|≈0，离 home 约 0.11 rad。历史上 kd>=4.5 会激发高频振荡
-# （|dq| 冲到 40 rad/s，狗原地抖动并后退），所以别随手往上加。
+# 站立 z≈0.268 m、|dq|≈0，离 home 约 0.11 rad。
 KP = 60.0
 KD = 3.5
 
@@ -98,9 +97,7 @@ class EnvCfg:
     kd: float = KD
     # 关节目标 = 默认站姿 + action_scale * 动作。**这个值决定了狗能跨多高的槛，不是随便调的**。
     #
-    # 别用"固定机身扫关节可达集"来估这个值——那样算出来的是"摆姿势能抬多高"，跟"走着撞上槛、
-    # 靠摩擦顶上去"完全两回事，会严重高估（0.40 时静态可达 15.8 cm，实际连 8 cm 的槛都过不去）。
-    # 可信的测法是直接跑：拿手调开环小跑（无反馈）撞槛，扫出「绝对摆幅 -> 能跨过的最高槛」：
+    # 测法是直接跑：拿手调开环小跑（无反馈）撞槛，扫出「绝对摆幅 -> 能跨过的最高槛」：
     #
     #     action_scale   0.04m  0.06m  0.08m  0.10m  0.12m
     #         0.40        过     卡     卡     卡     卡
@@ -130,18 +127,15 @@ class EnvCfg:
     privileged: bool = False
 
     # --- 终止 / 成功判据
-    # 实测：完全瘫倒时 base 离地约 0.077 m；而跨台阶（机身已在上一级正上方、脚还在下一级）
-    # 这个余量最低约 0.12 m。所以阈值取 0.10，取 0.12 以上会误判跨步为摔倒。
-    fall_clearance: float = 0.10
-    # 实测：跨 0.15 m 台阶时 pitch 合法地能到约 0.4 rad，所以不能取 0.8。
-    flip_rad: float = 1.0
+    fall_clearance: float = 0.10  # 机身低于当地地形这么多就判摔倒（阈值依据见 AGENT.md §5-C3）
+    flip_rad: float = 1.0  # |roll| 或 |pitch| 超过它判翻转（阈值依据见 AGENT.md §5-C3）
     out_y: float = 2.5
     out_x_back: float = -1.0
     # 顶台阶顶面 0.92 m，x∈[3.14, 3.66]，平台深 0.52 m。不取 x>=3.6：那里离 0.92 m 悬崖
     # 只剩 6 cm，会奖励"冲过终点再摔下去"。
     goal_x: float = 3.30
-    # goal_z 是 env 建好地形后按 terrain.top(goal_x) + goal_clearance 算出来的，**不是**这里的值。
-    # 写死 1.05 会在课程缩放后失效（scale=0.3 的平台只有 0.28 m 高，永远判不了成功）。
+    # goal_z 是 env 建好地形后按 terrain.top(goal_x) + goal_clearance 算出来的，**不是**这里的值
+    # （为什么不能写死见 AGENT.md §5-C4）。
     goal_z: float = 1.05
     goal_clearance: float = 0.15  # 站上顶面时 base 约比顶面高 0.27，留 0.15 表示确实站在高处
     goal_y: float = 1.0
@@ -195,19 +189,11 @@ class RewardCfg:
     # 是"站着不动"第二大的一笔白拿收入；收到 0.1 后只剩 0.027。
     track_sigma: float = 0.1
     height_target: float = 0.27  # 站立时 base 离地高度
-    # 高度偏差的死区：跨台阶时"前脚在上、后脚在下"的跨坐姿势天然比目标低一截，
-    # 那是正确动作。没有死区时它会一直挨罚，把"爬台阶"和"姿态难看"绑成一回事。
-    height_dead_zone: float = 0.05
-    # 接触力的免罚底噪（牛顿）：用小腿顶着台阶沿蹭上去时稳定几十牛，那是爬不是撞。
-    collision_force_free: float = 25.0
-    # climb 项的折扣。**必须是 1.0**（原来配的 0.995 与 TrainCfg.gamma 一致，是错的）：
-    # 折价形式的势能塑形在 Φ 沿路增长时会漏成"按停留时长计的税"，
-    # 实测 (1−γ)·h·100 就是 0.46 分/步、站在台阶上 1000 步 -460 分。推导见 reward._progress。
-    climb_gamma: float = 1.0
-    # 地形各方块只有 y∈[-2, 2] 宽，外面是无限平地。不设这两道闸门的话，策略绕到旁边走平地
-    # 就能白拿前进奖励（x 无上限地涨），这是这套地形里最容易刷的分。
-    progress_y_gate: float = 1.25
-    progress_x_cap: float = 3.5  # 过了这里不再给前进奖励，免得为了拿分冲下悬崖
+    height_dead_zone: float = 0.05  # 高度偏差的死区（为什么需要见 AGENT.md §5-B4）
+    collision_force_free: float = 25.0  # 接触力的免罚底噪，牛顿（见 AGENT.md §5-B4）
+    climb_gamma: float = 1.0  # climb 项的折扣，**必须为 1.0**（推导见 AGENT.md §5-B2）
+    progress_y_gate: float = 1.25  # 前进奖励的走廊宽度闸门（防刷分，见 AGENT.md §5-B5）
+    progress_x_cap: float = 3.5  # 过了这里不再给前进奖励
 
 
 @dataclass

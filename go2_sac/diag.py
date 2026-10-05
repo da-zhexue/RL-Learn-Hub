@@ -1,7 +1,5 @@
 """诊断工具：地形、步态、策略卡住时到底发生了什么。
 
-这些检查都是调这套任务时**实际用来定位问题**的，每个都对应一次踩坑：
-
     python3 -m go2_sac.diag terrain     # 地形几何 & 课程缩放是否正确
     python3 -m go2_sac.diag stance      # 标称站姿能站多高、肚子离地多少（决定爬不爬得过槛）
     python3 -m go2_sac.diag lift        # 手调小跑的抬脚高度 -> 能跨多高的槛
@@ -9,10 +7,6 @@
     python3 -m go2_sac.diag policy <model.zip> [地形] [scale]   # 训练后策略的抬脚高度
     python3 -m go2_sac.diag why <model.zip> <scale>            # 回合为什么提前结束
     python3 -m go2_sac.diag reward <model.zip> <scale>         # 分项奖励拆解
-
-为什么不用"固定机身扫关节可达集"估 action_scale：那样量到的是"原地摆姿势脚能抬多高"，
-跟"走着撞上槛、靠摩擦顶上去"完全两回事，会严重高估（0.40 时静态可达 15.8 cm，
-实际连 8 cm 的槛都碰不上去）。只有直接跑才作数。
 
 `stance` 回答的是另一个问题：不是"脚能抬多高"，而是"**肚子能离地多高**"。
 狗卡在槛前不是抬不起脚（前脚实测能抬 0.154 m），是肚子比槛还低——
@@ -241,9 +235,7 @@ def cmd_stance(argv):
 def cmd_lift(argv):
     """手调开环小跑的抬脚高度随幅度的变化。
 
-    **必须跳过前 150 步**：reset 把狗放在地形上方 0.30~0.33 m 让它自己落稳，
-    下落过程中四条腿都是悬空的，那一瞬间的"抬脚高度"能到 0.15 —— 比真走路高一倍，
-    会得出"脚抬得起来"的错误结论。这里只统计落地之后的稳定行走段。
+    `skip` 之后才统计：reset 的落地过程里四条腿全是悬空的，量出来的不是步态（见 AGENT.md §5-C5）。
     """
     skip = int(argv[0]) if argv else 150
     ascale = float(argv[1]) if len(argv) > 1 else EnvCfg().action_scale
@@ -344,10 +336,8 @@ def cmd_why(argv):
     print(f"{path}  scale={scale}  action_scale={cfg.action_scale}  "
           f"起始 x∈{tuple(cfg.reset_x)}  max_episode_s={cfg.max_episode_s}\n")
     for ep in range(n_ep):
-        # 自己记而不是用 run_once：**出生点必须打出来**。reset 把狗扔在地形上方
-        # 0.30~0.33 m 让它自由落体，如果落在槛的棱上（一条腿在槛顶、一条腿悬空），
-        # 落地就会侧翻——实测有好几个回合在 17~31 步（0.3~0.6 秒）就翻了，
-        # x 还只有 1.3~2.1，那还在平地上。不打出出生点就看不出来这一层。
+        # 自己记而不是用 run_once：要连出生点一起打出来。出生时踩在棱上会立刻侧翻，
+        # 光看最远 x 会把它误当成"走不动"（落点机制见 AGENT.md §5-C1）。
         st = {"x": -9.0, "lv": 0}
 
         def on_step(e):

@@ -72,34 +72,15 @@ def make_env(env_cfg: EnvCfg, reward_cfg: RewardCfg, seed: int):
 
 # --------------------------------------------------------------- 演示数据预热
 #
-# 为什么需要这一步：SAC 配一个没有相位输入的前馈 MLP，要"发现"周期步态只能靠逐维白噪声探索。
-# 实测这条路走不通——自动熵系数会把探索噪声迅速压下去（α→0.024，200k 步后 σ≈0.25），
-# 折算到关节上只有 ±0.06 rad 的随机抖动；而能让狗真正走起来的对角小跑需要 **±0.25 rad 的
-# 相干振荡**。于是 replay buffer 里全是"站着"的转移，Q 函数只学到"站着最好"，actor 永远不迈腿
-# （200k 步平均 vx = 指令的 0.00 倍，脚最多抬 7 cm，上不了 8 cm 的槛）。
-#
-# 这和奖励无关——同一个 env 里跑下面这个手调开环小跑，10 秒能走 4.57 m。
-#
-# 所以把"走路是可能的"直接告诉 Q：先用开环小跑采一批转移塞进 buffer（SACfD / demonstration
-# seeding，四足里的标准做法）。预热只给 Q 一个起点，策略之后仍然完全自由地学。
+# 先用开环小跑采一批转移塞进 replay buffer（SACfD / demonstration seeding），
+# **只给 Q 一个起点**，策略之后仍然完全自由地学。为什么必须这么做见 AGENT.md §6.4。
 
 # 执行器顺序 FR, FL, RR, RL；对角小跑 FR+RL 同相、FL+RR 反相
 _TROT_PHASE = np.repeat(np.array([0.0, np.pi, np.pi, 0.0]), 3)
 
-# 预热数据**重新标注奖励**：只保留"任务项"，姿态/能耗项一律置零。
-#
-# 起因是实测：新奖励把"站着不动"的保底收入砍到恰好 0 之后，预热数据的平均分变成了
-# **−0.286 分/步**（A=1.0、8 个回合、8/8 摔倒），分项是
-#     yaw_rate −0.181   yaw −0.162   lateral −0.142   ← 开环小跳在自转、横漂
-#     progress +0.156   track_lin_vel +0.150         ← 走路本身是正的
-# 而站着不动是 0。于是预热**恰好教反了**：它在告诉 Q"小跳比站着差"，而预热的全部意义
-# 就是告诉 Q"走路比站着强"。（旧奖励下站着有 +0.19 的保底，所以这个反转一直没暴露。）
-#
-# 根因是 `trot_action` 只驱动大腿和小腿（a[1::3]、a[2::3]），**没有髋关节**，横向和航向
-# 根本不可控——这是开环小跳的固有限制，不是参数没调好。姿态惩罚是给有反馈的闭环策略
-# 准备的，拿它去罚一条开环轨迹只会污染 Q 的起点。
-#
-# 重新标注不影响正确性：预热数据只是 critic 的**起点**，之后会被真实转移逐步纠正。
+# 预热数据**重新标注奖励**：只保留任务项，这些姿态/能耗项一律置零。
+# `trot_action` 只驱动大腿和小腿、没有髋关节，必然自转横漂，原样计费会把预热数据
+# 变成负分（理由和实测数字见 AGENT.md §5-B6）。
 POSTURE_TERMS = (
     "base_height", "lateral", "orientation", "yaw", "yaw_rate",
     "action_rate", "torques", "collision",
@@ -120,9 +101,7 @@ def trot_action(t: int, freq: float, amp: float, phase: float, control_hz: float
 def collect_seed_transitions(env_cfg, reward_cfg, n_trot, n_rand, seed=0):
     """采一批开环小跑（+ 少量站立/随机动作）的转移用于预热。单进程跑，几十秒。
 
-    奖励用 `reward_cfg` 的**任务项**，姿态/能耗项按 POSTURE_TERMS 置零——原因见那里的注释：
-    开环小跳没有髋关节控制、必然自转横漂，原样计费会让预热数据变成负分，
-    教出"站着比走路好"这个与意图完全相反的起点。
+    奖励用 `reward_cfg` 的**任务项**，姿态/能耗项按 POSTURE_TERMS 置零。
     """
     demo_cfg = replace(reward_cfg, **{k: 0.0 for k in POSTURE_TERMS})
     env = Go2TerrainEnv(env_cfg, demo_cfg)
@@ -216,8 +195,7 @@ class EvalMetricsCallback(BaseCallback):
                 vx_now, cmd_now = float(e.data.qvel[0]), float(e.cmd_vx)
                 vxs_all.append(vx_now)
                 cmds_all.append(cmd_now)
-                # 速度跟踪比才是"会不会走路"的判据：光看回报分不出"学会了小跑"和
-                # "站着不动领保底"。跳过前 100 步（起步 2 s 的加减速）。
+                # 跳过前 100 步（起步 2 s 的加减速），只统计稳态（判据见 AGENT.md §5-D5）
                 if e.step_count > 100:
                     vxs.append(vx_now)
                     cmds.append(cmd_now)
@@ -228,10 +206,8 @@ class EvalMetricsCallback(BaseCallback):
             max_xs.append(best_x[0])
             n_success += int(info["success"])
 
-        # 5 个回合全部在 100 步内结束时 vxs 是空的，而 np.mean([]) = NaN。
-        # 那个 NaN 看着像"仿真数值发散"，实际含义是"策略一上去就摔"——恰好在最需要
-        # 看清的时候把信息藏起来了（我为此追了一轮根本不存在的 MuJoCo 发散问题）。
-        # 这时退回到用全部步的数据，并在打印时标出来。
+        # 回合全在 100 步内结束时 vxs 是空的（np.mean([]) = NaN），退回用全部步的数据，
+        # 并在打印时标出来（见 AGENT.md §5-D4）。
         short_episodes = not vxs
         if short_episodes:
             vxs, cmds = vxs_all, cmds_all
@@ -286,42 +262,28 @@ def parse_args(argv=None):
                    help="地形高度整体缩放（课程用）：0.3 / 0.6 / 1.0 逐级长高，1.0=原场景，0=平地。"
                         "x/y 脚印不变，只压矮高度")
     p.add_argument("--action-scale", type=float, default=None, metavar="A",
-                   help="关节目标幅度，决定能跨多高的槛。续训时必须显式给：不加这个参数的话"
-                        "会沿用被续训模型 config.json 里的旧值，改了默认值也不生效")
+                   help="关节目标幅度，决定能跨多高的槛。续训时必须显式给，否则沿用 checkpoint 的值（见 AGENT.md §5-A2）")
     p.add_argument("--learning-rate", type=float, default=None, metavar="LR",
-                   help="微调时调小（如 1e-4）：默认 3e-4 配随机初始化的 Q，前几步梯度会把"
-                        "已经会走路的策略直接打散")
+                   help="微调时调小（如 1e-4）。续训时不显式给会被 checkpoint 的值静默覆盖（见 AGENT.md §5-A1）")
     p.add_argument("--target-entropy", type=float, default=None, metavar="H",
-                   help="SAC 的目标熵。**从零训练和微调要用完全不同的值**：从零训需要大探索"
-                        "（默认 -6.0，噪声折算到关节有 ±0.22 rad，比整个步态幅度还大），"
-                        "但微调一个已经会走路的策略时，这么大的噪声会让采集到的数据由失败回合"
-                        "主导，critic 被带成全面悲观、actor 跟着塌（实测 Q 同状态上从 +18 掉到 -26）。"
-                        "微调建议 -12 ~ -15")
+                   help="SAC 的目标熵，从零训练默认 -6.0（SB3 默认 -12 会压掉探索，见 AGENT.md §6.4）")
     p.add_argument("--gradient-steps", type=int, default=None, metavar="G",
-                   help="每收集一轮（= train_freq × n_envs = 8 个环境步）做几次梯度更新。"
-                        "**默认 -1（即 UTD=1）比历史配置快 8 倍的代价**：一轮 8 次更新时实测"
-                        "只有约 55 环境步/秒，而 -1 之外的历史值（1）是 440 步/秒。"
-                        "注意 1 对应的是 UTD=1/8 而不是 1，见 TrainCfg.gradient_steps 的推导")
+                   help="每收集一轮（= train_freq × n_envs = 8 个环境步）做几次梯度更新，"
+                        "不是「每次更新几步」（见 AGENT.md §5-A4 和 TrainCfg.gradient_steps）")
     p.add_argument("--fresh-reward", action="store_true",
-                   help="续训时**不**沿用 checkpoint 里的奖励权重，改用当前 RewardCfg 的默认值。"
-                        "换课程阶段必须加：比如平地练完去练过槛，climb 从 2.0 提到 20.0、"
-                        "base_height 加死区，不加这个开关旧权重会被静默恢复回来，"
-                        "看起来改了奖励其实一点没生效")
+                   help="续训时**不**沿用 checkpoint 里的奖励权重，改用当前 RewardCfg 的默认值；"
+                        "换课程阶段必须加（见 AGENT.md §5-A2）")
     p.add_argument("--eval-freq", type=int, default=None, metavar="N",
                    help="每 N 个环境步评估一次（默认 50000）")
     p.add_argument("--eval-episodes", type=int, default=None, metavar="N",
-                   help="每次评估跑几个回合。**默认 20，别往小调**：5 个回合时成功率的"
-                        "标准误是 ±22 个百分点，best_model 等于在按噪声选——实测同一个模型"
-                        "在 5 个回合上报 4/5、40 个回合上只有 12/40，而每一级『训练把模型练坏了』"
-                        "都是在拿一个幸运样本的旧评估去比一个新评估")
+                   help="每次评估跑几个回合。**默认 20，别往小调**（理由见 AGENT.md §5-D2）")
     p.add_argument("--checkpoint-freq", type=int, default=None, metavar="N",
                    help="每 N 个环境步存一个 checkpoint（默认 200000）")
     p.add_argument("--torch-threads", type=int, default=TrainCfg.torch_threads)
     p.add_argument("--seed-trot", type=int, default=None, metavar="N",
-                   help="用 N 条开环小跑轨迹预热 replay buffer，让 Q 一开始就知道走路比站着强；"
-                        "0 = 关闭。不写时：从头训练默认开（默认关闭的话 SAC 会卡在站着不动的"
-                        "局部最优），**续训默认关**（预热喂的手调小跑比已经会走路的策略差得多，"
-                        "拿它当先验等于把好策略往回拽）")
+                   help="用 N 条开环小跑轨迹预热 replay buffer（原理见 AGENT.md §6.4）；0 = 关闭。"
+                        "不写时：从头训练默认开，**续训默认关**——预热喂的手调小跑比已经会走路的"
+                        "策略差得多，拿它当先验等于把好策略往回拽")
     return p.parse_args(argv)
 
 
@@ -439,10 +401,7 @@ def main(argv=None):
           f"观测维度={45 + (1 if env_cfg.privileged else 0)}  "
           f"环境数={args.n_envs}  总步数={args.steps:,}  输出目录={run_dir}")
 
-    # 每个 --save-dir 一个 tb 子目录。全写进 runs/ 的话 SB3 只按 SAC_<n> 递增编号，
-    # 几十轮课程下来 runs/SAC_15 里会堆几十个 event 文件、步数区间互相重叠，
-    # 读曲线时会把不同学习率、不同地形的 run 混成一条（实测被它误导过一次：
-    # 3.35M 处同时出现 -11.98 / 122.5 / 50.61 / 219.4 四个"同一个点"）。
+    # 每个 --save-dir 一个 tb 子目录（全写进 runs/ 会把不同 run 的曲线混成一条，见 AGENT.md §5-A5）
     tb_dir = RUNS_DIR / run_dir.name
     tb_dir.mkdir(parents=True, exist_ok=True)
 
@@ -457,18 +416,9 @@ def main(argv=None):
 
     if resume_path is not None:
         model = SAC.load(str(resume_path), env=vec_env, device="cpu", tensorboard_log=str(tb_dir))
-        # 续训必须显式把超参再盖回去。SB3 的 load 先 `model.__dict__.update(data)`
-        # （checkpoint 里存的超参整个恢复）再 `update(kwargs)`，而 SAC.load() 没有传 kwargs，
-        # 于是命令行给的 learning_rate/gamma/tau/batch_size 全被**静默忽略**。
-        # 这和 --action-scale、--fresh-reward 是同一类陷阱（第三次了），而且最难发现：
-        # 实测拿同一个模型分别用 --learning-rate 2e-4 和 1e-4 续训 5 万步，
-        # 两次评估数字逐位相同（177.2 / 62.8 / 138.4）——参数压根没生效。
-        # 课程脚本里每级都写着 LR=2e-4，实际一直跑的是最初建模型时的 3e-4。
-        #
-        # 光赋值 learning_rate 不够：SB3 里它**不是 property**，只是个普通属性。
-        # 每个梯度步真正生效的是 SAC.train() 里的 `_update_learning_rate(optimizers)`，
-        # 它读的是 `self.lr_schedule(...)`，然后写进 actor/critic/ent_coef 三个优化器。
-        # 所以要连 lr_schedule 一起换，否则三个优化器一个都不会动。
+        # 续训必须显式把超参再盖回去：SAC.load() 不传 kwargs，checkpoint 里存的超参
+        # 会整个恢复、静默压掉命令行给的（见 AGENT.md §5-A1）。
+        # 光 setattr("learning_rate") 不够，要连 lr_schedule 一起换。
         changed = {}
         for name, want in (
             ("learning_rate", train_cfg.learning_rate),

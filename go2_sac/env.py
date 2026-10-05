@@ -1,10 +1,10 @@
 """Go2 过地形强化学习环境（Gymnasium）。
 
-**进程内直接跑 MuJoCo，不走 DDS**：DDS 仿真被实时锁在 200 Hz 且只有单环境，
-跑 SAC 完全没戏。训练地形就是 unitree_mujoco 自带的那份 scene.xml。
+**进程内直接跑 MuJoCo，不走 DDS**：DDS 仿真被实时锁在 200 Hz 且只有单环境。
+训练地形就是 unitree_mujoco 自带的那份 scene.xml。
 
-观测刻意设计成 45 维、全部能从 DDS 的 LowState 复现（四元数/角速度/关节角/关节速），
-这样 `play.py --mode dds` 不用改任何东西就能把同一套策略发到仿真或真机上。
+观测是 45 维、全部能从 DDS 的 LowState 复现，所以 `play.py --mode dds`
+不用改任何东西就能把同一套策略发到仿真或真机上。
 """
 
 from __future__ import annotations
@@ -50,10 +50,8 @@ class Go2TerrainEnv(GymEnv):
         self.model.opt.timestep = self.cfg.sim_dt
         self.data = mujoco.MjData(self.model)
         self.terrain = terrain.TerrainHeight(self.model)
-        # 成功判据里的"站上顶平台"高度只能从地形量，不能写死：课程压矮后平台也变矮了。
-        # 没有台阶的课程（flat / steps）就没有"顶平台"这回事，必须把高度设成够不着——
-        # 否则 flat 上 goal_z 会是 0.15，"走到 x>=3.3" 就判成功，回合提前结束，
-        # 白白砍掉后面十几秒的行走奖励（实测平地回报从 715 掉到 281）。
+        # 成功判据里的"站上顶平台"高度按地形量出来。没有台阶的课程（flat / steps）
+        # 就没有"顶平台"这回事，高度设成够不着（理由见 AGENT.md §5-C4）。
         self.cfg.goal_z = (
             self.terrain.top(self.cfg.goal_x, 0.0) + self.cfg.goal_clearance
             if self.terrain.stair_tops
@@ -81,9 +79,8 @@ class Go2TerrainEnv(GymEnv):
     def _build_index_maps(self):
         """执行器顺序 <-> qpos/qvel 地址。
 
-        qpos 的关节顺序跟着**身体树**走，是 FL, FR, RL, RR；
-        而执行器、DDS 报文、go2.xml 里的 sensor 全是 FR, FL, RR, RL。两边不一样！
-        实测 actuator_trnid -> qpos 地址 = [10,11,12, 7,8,9, 16,17,18, 13,14,15]，
+        qpos 的关节顺序跟着**身体树**走（FL, FR, RL, RR），而执行器、DDS 报文、
+        go2.xml 里的 sensor 全是 FR, FL, RR, RL，两边不一样。
         """
         jnt = self.model.actuator_trnid[:, 0]
         self.qadr = self.model.jnt_qposadr[jnt]
@@ -170,10 +167,7 @@ class Go2TerrainEnv(GymEnv):
         d.qpos[0] = x
         d.qpos[1] = y
         # home 关键帧的脚底本来就陷进地面约 18 mm，这里抬到地形上方让它自己落稳。
-        # **必须按整只狗的脚印取最大地形高度，不能用中心点**：横跨槛的棱或台阶的
-        # 立面时，中心在平地而前脚已探到台阶上方，用中心高度会把前脚连同小腿
-        # 整个生成在地形内部（实测埋深 0.09 m），求解器一上来就给巨大接触力，
-        # 狗在 0.3 秒内被弹翻。详见 TerrainHeight.top_footprint 的注释。
+        # **按整只狗的脚印**取地形高度，不能只用中心点（理由见 AGENT.md §5-C1）。
         d.qpos[2] = self.terrain.top_footprint(x, y) + float(rng.uniform(*cfg.reset_z))
         d.qpos[3:7] = (np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0))
         d.qvel[:] = 0.0
@@ -183,7 +177,7 @@ class Go2TerrainEnv(GymEnv):
         self.prev_terrain_h = self.terrain.top(x, y)
         self.prev_terrain_level = self.terrain.level(x, y)
         self.step_count = 0
-        # 必须前推一次：否则接触/传感器数据还是上一回合的
+        # 前推一次，否则接触/传感器数据还是上一回合的
         mujoco.mj_forward(self.model, d)
 
         info = {
@@ -223,7 +217,7 @@ class Go2TerrainEnv(GymEnv):
             or terrain.is_flipped(cfg, rpy)
             or terrain.is_out_of_course(cfg, base_pos)
         )
-        # 超时用 truncated 而不是 terminated，SB3 才会正确地做 bootstrap
+        # 超时走 truncated 而不是 terminated，SB3 才会正确地做 bootstrap
         truncated = bool((not terminated) and self.step_count >= self.max_steps)
 
         r = RewardInput(
@@ -264,8 +258,7 @@ class Go2TerrainEnv(GymEnv):
             "level": self.terrain.level(base_pos[0], base_pos[1]),
             "success": success,
             "is_success": success,  # SB3 的 Monitor 会用它统计
-            # parts 里本来也有个 "success"（权重 20.0 的那个），被上面这个布尔值**覆盖**了，
-            # 于是任何按 info 累加分项的诊断都会把 +20 看成 +1，白丢一笔。改名另存一份。
+            # reward 分项里的 "success"（权重 20.0）被上面这个布尔值覆盖了，改名另存一份
             "success_bonus": parts["success"],
         }
         return self._obs(), float(reward), terminated, truncated, info

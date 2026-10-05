@@ -18,12 +18,11 @@ Q_MIN = np.array([-1.0472, -1.5708, -2.7227] * 2 + [-1.0472, -0.5236, -2.7227] *
 Q_MAX = np.array([ 1.0472,  3.4907, -0.83776] * 2 + [ 1.0472,  4.5379, -0.83776] * 2, dtype=np.float32)
 
 class Go2Ctrl:
-    # kd 不宜超过 4.0：实测 kd>=4.5 时微分项会激发高频振荡（|dq| 冲到 ~40 rad/s），
-    # 狗原地抖动并向后走；kd<=4.0 时完全静止。参考 stand_go2.py 用的也是 3.5。
+    # kp/kd 的取值依据（kd 有上限）见 AGENT.md §4.6；参考 stand_go2.py 用的也是 3.5。
     def __init__(self, kp=60.0, kd=3.5, ctrl_dq_max=0.002, dt=0.002,
                  domain_id=None, interface=None):
-        # 显式传 domain_id/interface 时优先用它们；都不传则沿用原来的行为（按 sys.argv[1] 判断）。
-        # 显式参数是给 play.py 这类"自己也有命令行参数"的调用方用的——否则会把 --model 当网卡名。
+        # 显式传 domain_id/interface 时优先用它们；都不传才按 sys.argv[1] 判断。
+        # 别的脚本导入 Go2Ctrl 时必须显式传，否则会把命令行参数当网卡名（见 AGENT.md §5-E6）。
         if domain_id is not None or interface is not None:
             ChannelFactoryInitialize(0 if domain_id is None else domain_id,
                                      "lo" if interface is None else interface)
