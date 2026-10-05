@@ -1,0 +1,8 @@
+**/.vscode/
+**/__pycache__/
+unitree_mujoco/
+unitree_ros2/
+unitree_sdk2_python/
+logs/
+runs/
+models/
