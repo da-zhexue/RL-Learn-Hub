@@ -86,20 +86,26 @@ python3 ctrl_test.py
 x∈[1.7, 2.1] 是楼梯前仅有的 0.4 m 平路——出生点要落在这附近才有助跑。
 
 ### 目录
+环境、地形、奖励都是 SAC / PPO 共用的，放在 `go2_common/`，两个算法包里只有各自的算法代码；
+两个包的命令行参数、目录结构、`config.json` 格式完全一致，换算法只是换个模块名。
+
 ```
-go2_sac/config.py    常量、EnvCfg/RewardCfg/TrainCfg 配置类、四元数工具
-go2_sac/terrain.py   课程变体、地形高度查询、成功/摔倒判据
-go2_sac/env.py       Go2TerrainEnv（Gymnasium 环境）
-go2_sac/reward.py    奖励函数：每项一个函数，权重在 RewardCfg 里同名对应
-go2_sac/train.py     SAC 训练入口
-go2_sac/play.py      回放（viewer / dds）
-go2_sac/diag.py      诊断工具（地形/站姿/抬脚/奖励分项/回合为什么结束）
+go2_common/config.py       常量、EnvCfg/RewardCfg 配置类、四元数工具
+go2_common/terrain.py      课程变体、地形高度查询、成功/摔倒判据
+go2_common/env.py          Go2TerrainEnv（Gymnasium 环境）
+go2_common/reward.py       奖励函数：每项一个函数，权重在 RewardCfg 里同名对应
+go2_common/train_utils.py  环境工厂、评估回调、从 config.json 还原环境配置
+go2_sac/config.py          SAC 的 TrainCfg
+go2_sac/train.py           SAC 训练入口
+go2_sac/play.py            回放（viewer / dds）
+go2_sac/diag.py            诊断工具（地形/站姿/抬脚/奖励分项/回合为什么结束）
+go2_ppo/*.py               同上，把算法换成 PPO
 ```
 
 ### 训练
 从头训：
 ```
-python3 -m go2_sac.train --terrain flat --steps 600_000       # 先学会在平地小跑
+python3 -m go2_sac.train --terrain flat --steps 200_000 --checkpoint-freq 40_000     # 先学会在平地小跑
 ```
 然后跑地形课程（从上面那个平地模型出发，逐级放开地形）：
 ```
@@ -108,13 +114,13 @@ python3 -m go2_sac.train --terrain flat --steps 600_000       # 先学会在平�
 手工逐级等价于（`--steps` 是本级再练多少步）：
 ```
 python3 -m go2_sac.train --terrain steps --terrain-scale 0.70 --fresh-reward \
-    --steps 250_000 --resume models/go2_sac_flat_xx/...               # 5.6 cm 的槛
+    --steps 1_000_000 --resume models/go2_sac_flat_xx/...               # 5.6 cm 的槛
 python3 -m go2_sac.train --terrain steps --terrain-scale 0.86 --fresh-reward \
     --reset-x -0.3 0.95 --steps 250_000 --resume models/cur_s070_steps/model.zip
 python3 -m go2_sac.train --terrain steps --terrain-scale 1.00 --fresh-reward \
-    --reset-x -0.3 0.95 --steps 400_000 --resume models/cur_s086_steps/model.zip  # 8 cm 的槛
+    --reset-x -0.3 0.95 --steps 1_000_000 --resume models/go2_sac_steps_s0.7_20261006_120850/checkpoints/rl_850000_steps.zip
 python3 -m go2_sac.train --terrain full  --terrain-scale 1.00 --fresh-reward \
-    --steps 400_000 --resume models/cur_s100_steps/model.zip          # 再加六级台阶
+    --steps 1_000_000 --resume models/go2_sac_steps_20261006_143205/checkpoints/rl_1850000_steps.zip          # 再加六级台阶
 ```
 - `--resume` 接上一阶段：`.zip` 可省略，`checkpoints/rl_xxx` 这种路径也行
   （`config.json` 会自动往上找一层）；**换阶段必须显式写 `--terrain`**，
@@ -189,3 +195,38 @@ Q 只学到"站着最好"，actor 永远不迈腿（实测平均 vx 是指令的
 - 小跑的幅度按**绝对关节摆幅**（0.24~0.40 rad）给、再除以 `action_scale` 折算成动作值，
   这样换 `action_scale` 时喂的还是同一个物理步态。直接写动作幅度（曾用 0.6~1.0）会随 `action_scale`
   一起放大——0.6 时摆幅冲到 0.6 rad，狗直接摔，采集量从 3.5 万条掉到 1.1 万条。
+
+## GO2强化学习过地形（PPO）
+和上面那节的**唯一区别是算法**：环境、地形、奖励、观测、课程分级、命令行参数、`config.json`
+格式全都一样，`go2_common/` 里那份代码两边共用，只是模块名从 `go2_sac` 换成 `go2_ppo`。
+
+### 训练
+从头训：
+```
+python3 -m go2_ppo.train --terrain flat --steps 200_000 --checkpoint-freq 40_000      # 先学会在平地小跑
+```
+然后跑同样的地形课程（`--steps` 是本级再练多少步）：
+```
+python3 -m go2_ppo.train --terrain steps --terrain-scale 0.70 --fresh-reward \
+    --steps 1_000_000 --resume models/go2_ppo_flat_xx/checkpoints/rl_200000_steps.zip   # 5.6 cm 的槛
+python3 -m go2_ppo.train --terrain full --terrain-scale 1.00 --fresh-reward \
+    --steps 1_000_000 --resume models/go2_ppo_steps_xx/checkpoints/rl_1000000_steps.zip # 再加六级台阶
+```
+`--resume`、`--fresh-reward`、`--steps`、`--terrain-scale`、`--action-scale` 的语义与 SAC 那节完全一致
+（包括"换阶段必须显式写 `--terrain` 和 `--fresh-reward`"）。
+
+### 回放
+```
+python3 -m go2_ppo.play --mode viewer --model models/go2_ppo_full_xxx/model.zip
+python3 -m go2_ppo.play --mode dds    --model models/go2_ppo_full_xxx/model.zip   # 另开 unitree_mujoco.py
+```
+
+### 与 SAC 的差异
+1. **没有预热**：PPO 是 on-policy，每轮采完就丢掉，没有 replay buffer 可以先填（命令行也没有
+   `--seed-trot`）。PPO 也不太需要——它的初始探索噪声 σ=1.0，而 SAC 当年的死因是自动熵把 σ 压到 0.25。
+2. **超参不同**：`n_steps=256`（SB3 默认的 2048 在 50 Hz 下是 41 s，**比整个回合 20 s 还长**）、
+   `batch_size=256`、`n_epochs=5`、`ent_coef=0.005`、`target_kl=0.02`（approx_kl 超了就提前结束本轮更新）。
+   `gamma=0.995` / 学习率 / `net_arch` 与 SAC 相同。可用
+   `--n-steps --batch-size --n-epochs --ent-coef --target-kl` 临时改。
+3. **不能跨算法续训**：`--resume` 只能接同一个算法存出来的模型。
+4. **续训可以改 `--n-steps` / `--batch-size`**：rollout buffer 不存进 checkpoint，会按新值自动重建。

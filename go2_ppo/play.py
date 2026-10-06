@@ -1,4 +1,4 @@
-"""回放训练好的 Go2 策略。
+"""回放训练好的 Go2 策略（PPO 版）。
 
 两种模式：
   --mode viewer （默认）在本机开个 MuJoCo 窗口回放，不需要 DDS
@@ -7,8 +7,8 @@
                     cd unitree_mujoco/simulate_python && python3 unitree_mujoco.py
 
 用法：
-    python3 -m go2_sac.play --mode viewer --model models/go2_sac_full_xxx/model.zip
-    python3 -m go2_sac.play --mode dds    --model models/go2_sac_full_xxx/model.zip
+    python3 -m go2_ppo.play --mode viewer --model models/go2_ppo_full_xxx/model.zip
+    python3 -m go2_ppo.play --mode dds    --model models/go2_ppo_full_xxx/model.zip
 
 观测定义与训练时完全一致（45 维，全部能从 DDS 的 LowState 复现），
 所以两种模式跑的是同一个策略、同一套输入。
@@ -49,21 +49,21 @@ FALLEN_UP = 0.5  # 机体系"上"方向的 z 分量小于这个值就算翻倒�
 
 
 def find_default_model() -> pathlib.Path | None:
-    """没给 --model 时，挑 models/ 里最新的一个 model.zip。"""
+    """没给 --model 时，挑 models/ 里最新的一个 go2_ppo 的 model.zip。"""
     if not MODELS_DIR.exists():
         return None
-    candidates = sorted(MODELS_DIR.glob("*/model.zip"), key=lambda p: p.stat().st_mtime)
+    candidates = sorted(MODELS_DIR.glob("go2_ppo_*/model.zip"), key=lambda p: p.stat().st_mtime)
     return candidates[-1] if candidates else None
 
 
 def load_policy(model_path: pathlib.Path):
     """加载策略，并尽量用它训练时的环境配置。"""
-    from stable_baselines3 import SAC
+    from stable_baselines3 import PPO
 
     env_cfg, reward_cfg = load_resume_configs(model_path)
     if env_cfg is None:
         env_cfg, reward_cfg = EnvCfg(scene=DEFAULT_SCENE, terrain="full"), RewardCfg()
-    model = SAC.load(str(model_path), device="cpu")
+    model = PPO.load(str(model_path), device="cpu")
     return model, env_cfg, reward_cfg
 
 
@@ -215,7 +215,8 @@ def parse_args(argv=None):
         description="回放训练好的 Go2 策略（viewer 本地回放 / dds 下发到仿真或真机）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--model", default=None, help="model.zip 路径，默认取 models/ 下最新的")
+    p.add_argument("--model", default=None,
+                   help="model.zip 路径，默认取 models/go2_ppo_* 下最新的")
     p.add_argument("--mode", choices=("viewer", "dds"), default="viewer")
     p.add_argument("--episodes", type=int, default=5)
     p.add_argument("--duration", type=float, default=20.0, help="dds 模式每个回合的时长，秒")
@@ -230,7 +231,7 @@ def main(argv=None):
     args = parse_args(argv)
     model_path = pathlib.Path(args.model) if args.model else find_default_model()
     if model_path is None or not model_path.exists():
-        print("找不到模型：用 --model 指定 model.zip 路径（或者先用 go2_sac.train 训一个）")
+        print("找不到模型：用 --model 指定 model.zip 路径（或者先用 go2_ppo.train 训一个）")
         return 1
     print(f"加载模型 {model_path}")
 

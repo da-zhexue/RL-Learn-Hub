@@ -13,14 +13,22 @@
 
 ```
 /home/lin/unitree/
-├── go2_sac/              ← 本仓库自己的代码，只有这个目录是我们写的
-│   ├── config.py         常量、EnvCfg/RewardCfg/TrainCfg、quat_to_rpy/projected_gravity
+├── go2_common/           ← 算法无关的共享层，SAC / PPO 共用同一份（**只有这一份**）
+│   ├── config.py         常量、EnvCfg/RewardCfg、quat_to_rpy/projected_gravity（不 import mujoco）
 │   ├── terrain.py        课程变体构造(build_model)、地形高度查询(TerrainHeight)、判据
-│   ├── env.py            Go2TerrainEnv（Gymnasium）
+│   ├── env.py            Go2TerrainEnv（Gymnasium）+ run_episode
 │   ├── reward.py         奖励：每项一个函数 + compute_reward() -> (total, parts)
-│   ├── train.py          SAC 训练入口（含 diag 用的 run_episode、预热、评估回调）
+│   └── train_utils.py    make_env / EvalMetricsCallback / load_resume_configs / resolve_model_path
+├── go2_sac/              ← 只有 SAC 专属的东西
+│   ├── config.py         SAC 的 TrainCfg
+│   ├── train.py          SAC 训练入口（含 diag 用的 trot_action、演示数据预热）
 │   ├── play.py           回放/部署（--mode viewer / dds）
 │   └── diag.py           诊断子命令：terrain/stance/lift/frontier/policy/why/reward
+├── go2_ppo/              ← 同上，算法换成 PPO；无预热，其余与 go2_sac 一一对应
+│   ├── config.py         PPO 的 TrainCfg
+│   ├── train.py          PPO 训练入口
+│   ├── play.py           回放/部署
+│   └── diag.py           薄壳：把 go2_sac.diag.load_policy 换成 PPO.load 后转发（实现只有一份）
 ├── ctrl/                 ← 本仓库自己的代码
 │   ├── go2_ctrl.py       Go2Ctrl：DDS 收发 + 500 Hz 独立线程 + 插值平滑 + reset
 │   └── ctrl_test.py      DDS 手动测试
@@ -37,7 +45,9 @@
 ```
 
 **上游三个目录一律不改**。要改仿真行为只能通过：
-`go2_sac/terrain.py` 的 `MjSpec` 运行时改写（删/缩放几何体）、`env.py` 的步进逻辑、`config.py` 的参数。
+`go2_common/terrain.py` 的 `MjSpec` 运行时改写（删/缩放几何体）、`go2_common/env.py` 的步进逻辑、
+`go2_common/config.py` 的参数。奖励/环境**只改 `go2_common/` 里那一份**，两个算法包都跟着变——
+不要往 `go2_sac/` 或 `go2_ppo/` 里再抄一份环境或奖励。
 **用户的 `scene.xml` 不能改**——地形课程是运行时用 `MjSpec` 编译出来的变体，不落盘。
 
 ---
@@ -70,14 +80,28 @@ python3 -m go2_sac.play --mode viewer --model models/xxx/best/best_model.zip
 python3 -m go2_sac.play --mode dds --model models/xxx/model.zip   # 另开 unitree_mujoco.py
 ```
 
-`train.py` 的 CLI：`--terrain --scene --steps --n-envs --seed --save-dir --resume --privileged
+```bash
+# PPO：同样的课程、同样的参数名，只是换个模块
+python3 -m go2_ppo.train --terrain flat --steps 200000 --checkpoint-freq 40000
+python3 -m go2_ppo.play  --mode viewer --model models/go2_ppo_flat_xxx/model.zip
+```
+
+`go2_sac.train` 的 CLI：`--terrain --scene --steps --n-envs --seed --save-dir --resume --privileged
 --reset-x LO HI --terrain-scale --action-scale --learning-rate --target-entropy --gradient-steps
 --fresh-reward --eval-freq --eval-episodes --checkpoint-freq --torch-threads --seed-trot`。
 
-**吞吐基线**（8 环境、CPU）：
+`go2_ppo.train` 的 CLI = 上面**去掉** `--target-entropy --gradient-steps --seed-trot`
+（PPO 没有目标熵、没有 UTD 这个旋钮、没有 replay buffer 可预热），**加上**
+`--n-steps --batch-size --n-epochs --ent-coef --target-kl`。其余参数的语义逐字相同，
+包括"`--steps` 续训是本阶段再练多少步""换阶段必须 `--fresh-reward`"。
+
+**吞吐基线（SAC）**（8 环境、CPU）：
 - `gradient_steps=1` → **约 440 环境步/秒**（一次更新约 18 ms，8 步一更新）
 - `gradient_steps=2` → 约 220 步/秒；`-1`（UTD=1）→ **约 55 步/秒**
 - 据此估时间：2M 步 @ `gradient_steps=1` ≈ 75 分钟。
+
+**PPO 的吞吐还没正经测**（只跑过 512/1024 步的验证跑，秒级、被启动开销主导），
+估时间以运行时打印的 `time/fps` 为准，不要拿上面 SAC 的数字套。
 
 ---
 
@@ -340,6 +364,49 @@ viewer 跑完不调 `glfwTerminate`，主动按正常退出码结束进程。
 不传时行为不变。凡是从别的脚本（而不是直接 `python3 ctrl_test.py 网卡名`）导入 `Go2Ctrl`，
 都必须显式传这两个参数，不要依赖 `sys.argv`。
 
+### F. PPO / on-policy 专有（SAC 那份代码里没有这些坑）
+
+**F1 —— 想改 `n_steps` / `batch_size`，绝不能调 `model._setup_model()`。**
+- 现象：它会**重建策略网络**。`OnPolicyAlgorithm._setup_model()` 里有一句无条件的
+  `self.policy = self.policy_class(...)`，跑完权重全变成随机初始化的。
+- 根因：SAC 是 off-policy，`_setup_model` 只管网络和 buffer；PPO 复用了同一个函数，
+  而 PPO 的策略网络也在这个函数里建。
+- 修法（`go2_ppo/train.py` 续训段）：**只重建 rollout buffer**，照抄 `_setup_model` 里建 buffer 的
+  那几行（`rollout_buffer_class(n_steps, obs_space, act_space, device, gamma, gae_lambda, n_envs)`），
+  并且放在 gamma/gae_lambda 都设好之后。
+- 为什么安全：`rollout_buffer` 在 `_excluded_save_params` 里，**根本不存进 checkpoint**，
+  `load()` 时本来就会重建，所以重建它不丢任何东西。
+- 实测：续训（`--n-steps 256→128 --batch-size 256→64`）前后 `policy.state_dict()` 的
+  sha256 **逐位相同**（`ac4f1709…`），buffer 变成 `(128, 2, 45)`。
+
+**F2 —— `clip_range` 和 `learning_rate` 从 `load()` 回来时**形态不一样。
+- `clip_range` 是 `FloatSchedule`（`PPO._setup_model` 无条件包一层），而 `PPO.train()` 里写的是
+  `self.clip_range(self._current_progress_remaining)`。直接 `setattr(model, "clip_range", 0.2)`
+  → 第一次更新就抛 **`TypeError: 'float' object is not callable`**。
+- `learning_rate` 反过来：`BaseAlgorithm.__init__` 只是把它存下来，load 回来**就是裸 float**，
+  所以 `model.learning_rate(1.0)` 会同样报 `'float' object is not callable`（**实测踩到过**，
+  当时的写法是假设它俩都是 schedule）。但它仍然要连 `model.lr_schedule` 一起换（同 A1）。
+- 修法：用 `_lr_or_clip_value(v) = float(v(1.0)) if callable(v) else float(v)` 统一取值，
+  `clip_range` 用 `FloatSchedule(...)` 重新包一层。
+
+**F3 —— `log_interval` 在 on-policy 里是"训练迭代数"，不是回合数。**
+SAC 那份的 `log_interval=4` 是"每 4 个结束的回合记一次"；PPO 的默认 `1` 是
+**每采完一轮 rollout（`n_steps × n_envs` 步）就记一次**。别把两个数字互相搬。
+
+**F4 —— `train/*` 曲线比 `rollout/*` 晚一个记录点，只跑一轮时压根没有 `train/*`。**
+- 根因：`OnPolicyAlgorithm.learn()` 里 `dump_logs()` 在 `self.train()` **之前**调用，
+  而 `logger.dump()` 才是真正写 TB 的时刻。于是第 N 轮更新算出来的 `train/approx_kl` 等，
+  要到第 N+1 次 dump 才落盘（记在第 N+1 轮的步数上）。
+- 实测：512 步（1 轮迭代）跑完，TB 里只有 11 个 `rollout/* / eval/* / time/*` 标签，
+  **一个 `train/*` 都没有**；1024 步（2 轮）才有，且全部落在 `step=1024` 这一个点上。
+- 推论：**看到"`train/*` 怎么没数据"先看是不是跑得太短，不要怀疑 TB 写坏了。**
+  另外最后一轮更新的 `train/*` 不会出现在 TB 里。
+
+**F5 —— PPO 的 `n_steps` 不能照抄 SB3 的默认 2048。**
+策略 50 Hz、回合上限 20 s = 1000 步，2048 步是 **41 s**——一轮 rollout 比整个回合还长，
+同一段轨迹的陈旧数据被反复拿来做优势估计。默认改成 **256**（= 每环境 5.12 s）。
+`batch_size=256` 取 `n_steps × n_envs` 的约数，换 `--n-envs` 也不会出现零头 minibatch。
+
 ---
 
 ## 6. 实测数据（回答"这机器人能做多难"）
@@ -436,6 +503,12 @@ Q 只学到"站着最好"，actor 永远不迈腿。
 ## 7. 当前状态与未解问题
 
 **已完成**：平地 ✓、两个 0.08 m 槛 ✓、六级台阶（0.095 m/级）✓。
+
+**PPO 通道**（`go2_ppo/`）：代码已建好，静态检查全过；跑过一次 512 步的空跑（采一轮 rollout、
+做一次更新、评估回调正常、TB 有数），**但没有任何有意义的训练**。所以：
+- 上面所有关于"能爬多高""怎么调超参"的结论**全部来自 SAC**，不能当成 PPO 的；
+- PPO 没有预热，它的起点就是 σ=1.0 的随机策略（实测空跑时回合回报 −20.8、几乎原地就摔），
+  能不能像 SAC 那样从零走起来，**没有数据**，要试就从平地那一级开始。
 
 **没上去的**：**真实的 0.15~0.17 m 台阶**。现有 A=0.7 步态在任何振幅下都够不到（见 6.2）。
 

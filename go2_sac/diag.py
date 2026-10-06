@@ -22,9 +22,10 @@ import sys
 import mujoco
 import numpy as np
 
-from .config import DEFAULT_SCENE, EnvCfg, RewardCfg, quat_to_rpy
-from .env import FOOT_GEOM_NAMES, Go2TerrainEnv, run_episode
-from .train import load_resume_configs, trot_action
+from go2_common.config import DEFAULT_SCENE, EnvCfg, RewardCfg, quat_to_rpy
+from go2_common.env import FOOT_GEOM_NAMES, Go2TerrainEnv, run_episode
+from go2_common.train_utils import load_resume_configs
+from go2_sac.train import trot_action
 
 
 # ------------------------------------------------------------------ 通用
@@ -73,7 +74,7 @@ def policy_act(model):
 
 
 def cmd_terrain(argv):
-    from . import terrain as T
+    from go2_common import terrain as T
 
     print("地形几何（每个方块的顶面高度）与课程缩放：\n")
     for name, scale in (("flat", 1.0), ("steps", 1.0), ("steps", 0.35),
@@ -170,7 +171,7 @@ def stance_scan(nominal, action_scale, n_actions=200, seed=0):
 
     nominal 只写一条腿的 [hip, thigh, calf]，四条腿都一样（Go2 默认站姿就是对称的）。
     """
-    from . import env as E
+    from go2_common import env as E
 
     one = np.asarray(nominal, dtype=np.float64).ravel()
     if one.size == 3:
@@ -194,7 +195,7 @@ def stance_scan(nominal, action_scale, n_actions=200, seed=0):
 
 
 def cmd_stance(argv):
-    from .config import DEFAULT_Q
+    from go2_common.config import DEFAULT_Q
 
     print(f"当前 DEFAULT_Q = {np.array(DEFAULT_Q).reshape(4, 3).tolist()}  "
           f"action_scale = {EnvCfg().action_scale}\n")
@@ -271,7 +272,7 @@ def cmd_lift(argv):
 
 def cmd_frontier(argv):
     """扫 action_scale × 槛高，量出'动作幅度 -> 能跨多高的槛'。"""
-    from . import terrain as T
+    from go2_common import terrain as T
 
     def build(h):
         spec = mujoco.MjSpec.from_file(DEFAULT_SCENE)
@@ -369,7 +370,7 @@ def cmd_why(argv):
 
 
 def cmd_reward(argv):
-    from .reward import TERMS
+    from go2_common.reward import TERMS
 
     path, scale = argv[0], float(argv[1])
     n_ep = int(argv[2]) if len(argv) > 2 else 4
