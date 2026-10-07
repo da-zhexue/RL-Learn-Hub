@@ -6,3 +6,18 @@ unitree_sdk2_python/
 logs/
 runs/
 models/
+
+# Isaac 侧：转出来的 USD 几十 MB 起，还带一个同名的贴图/子层目录，而且随时能用
+# convert_assets.py 重转 —— 不进 git。
+# **但 `assets/go2_reference.json` / `drop_reference.json` 要进 git**：那两份是本机
+# （真有 MuJoCo 的那台）的测量真值，是上机比对的基准，在有卡那台机器上重算不出来。
+# （.gitignore **不支持行尾注释**——`#` 只有写在一行开头才是注释，
+#   写在后面会被当成模式的一部分，那条规则就静默失效了。所以下面每行都是纯模式。）
+#
+# USD 的子层 / 贴图目录（go2/、scene/ …）
+go2_issac/assets/*/
+# "这份 USD 是哪套版本转的" —— 和 USD 一样是本机产物，换台机器就没意义
+go2_issac/assets/manifest.json
+go2_issac/assets/*.usd
+go2_issac/assets/*.usda
+go2_issac/assets/*.usdc

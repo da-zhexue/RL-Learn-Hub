@@ -119,8 +119,12 @@ python3 -m go2_sac.train --terrain steps --terrain-scale 0.86 --fresh-reward \
     --reset-x -0.3 0.95 --steps 250_000 --resume models/cur_s070_steps/model.zip
 python3 -m go2_sac.train --terrain steps --terrain-scale 1.00 --fresh-reward \
     --reset-x -0.3 0.95 --steps 1_000_000 --resume models/go2_sac_steps_s0.7_20261006_120850/checkpoints/rl_850000_steps.zip
+python3 -m go2_sac.train --terrain full  --terrain-scale 0.70 --fresh-reward \
+    --steps 1_000_000 --resume models/go2_sac_steps_20261006_143205/checkpoints/rl_1850000_steps.zip
+python3 -m go2_sac.train --terrain full  --terrain-scale 0.85 --fresh-reward \
+    --steps 1_000_000 --resume models/go2_sac_full_s0.7_20261007_101816/checkpoints/rl_2850000_steps.zip
 python3 -m go2_sac.train --terrain full  --terrain-scale 1.00 --fresh-reward \
-    --steps 1_000_000 --resume models/go2_sac_steps_20261006_143205/checkpoints/rl_1850000_steps.zip          # 再加六级台阶
+    --steps 1_000_000 --resume models/go2_sac_steps_20261006_143205/checkpoints/rl_1850000_steps.zip          
 ```
 - `--resume` 接上一阶段：`.zip` 可省略，`checkpoints/rl_xxx` 这种路径也行
   （`config.json` 会自动往上找一层）；**换阶段必须显式写 `--terrain`**，
@@ -230,3 +234,57 @@ python3 -m go2_ppo.play --mode dds    --model models/go2_ppo_full_xxx/model.zip 
    `--n-steps --batch-size --n-epochs --ent-coef --target-kl` 临时改。
 3. **不能跨算法续训**：`--resume` 只能接同一个算法存出来的模型。
 4. **续训可以改 `--n-steps` / `--batch-size`**：rollout buffer 不存进 checkpoint，会按新值自动重建。
+
+## GO2强化学习过地形（Isaac Sim）
+把上面那套任务搬到 **NVIDIA Isaac Sim**：同样地形、同样 45 维观测、同样 14 项奖励、
+同样课程分级，但算法换成 **rsl_rl**、资产用仓库里的 `go2.xml` **自己转 USD**。
+
+> ⚠️ **当前这台开发机跑不了**：没有 NVIDIA 显卡（只有 AMD 核显），内存 27 GB、盘剩 21 GB，
+> 都低于 Isaac Sim 的最低要求——而它**没有 CPU 回退**。所以这一节写的代码要搬到有卡的机器上跑，
+> 步骤见 [go2_issac/RUNBOOK.md](go2_issac/RUNBOOK.md)。
+
+为了在没有显卡的情况下也能保证正确性，代码刻意分成两层：
+
+- **本机可证明的语义层**（纯 numpy / torch，不 import mujoco 也不 import isaaclab）：
+  `course.py` 地形几何、`core.py` 观测/奖励/终止判据。它们和真的 MuJoCo 环境**逐位对拍**
+  （`tests/course_parity.py`、`tests/core_parity.py`），差别在 1e-15（浮点求和顺序）。
+- **只能上机验证的接线层**：`env_cfg.py`、`mdp/`、`agents/`、`train.py` / `play.py` / `smoke.py`。
+
+所以上机后可能出错的只剩"Isaac API 接得对不对"，不会再有语义错误。
+
+### 目录
+```
+go2_issac/course.py            地形几何唯一真源（8 个方块 + 高程图），纯 numpy
+go2_issac/core.py              观测 / 14 项奖励 / 终止判据，纯 torch
+go2_issac/env_cfg.py           CourseEnvCfg（ManagerBasedRLEnvCfg）+ 地形生成
+go2_issac/mdp/                 rewards / observations / terminations / events / commands / metrics 薄壳
+go2_issac/agents/rsl_rl_ppo_cfg.py  rsl_rl 超参 = go2_ppo/config.py 的逐项映射
+go2_issac/convert_assets.py    go2.xml -> USD（在有卡的机器上跑）
+go2_issac/smoke.py             上机自检：资产/关节顺序/地形坐标/观测奖励/零动作静置
+go2_issac/train.py play.py     训练 / 回放
+go2_issac/assets/*.py          从编译后的 MjModel 导出资产真值与静置真值（本机跑，产物进 git）
+go2_issac/tests/*.py           和 MuJoCo 的逐位对拍（本机跑）
+go2_issac/RUNBOOK.md           上机手册
+```
+
+### 和有卡机器的交接
+本机能做的只有"把语义证明对"，剩下三步在那台机器上：
+
+```
+python3 go2_issac/convert_assets.py                       # 1. 转 USD
+python3 go2_issac/smoke.py --all --num-envs 4             # 2. 自检（别跳）
+python3 go2_issac/train.py --terrain flat --steps 200_000 --num-envs 512 --headless   # 3. 开训
+```
+
+### 与 MuJoCo 侧的差异
+1. **算法库换成 rsl_rl**：全程 GPU、没有 Python 逐环境循环，吞吐高两个数量级。
+   超参名全变了，映射表在 `agents/rsl_rl_ppo_cfg.py` 的模块注释里，改一边要照表同步。
+2. **资产自己转**：用仓库里的 `unitree_mujoco/unitree_robots/go2/go2.xml`，
+   **不用** Isaac Lab 官方给的 `UNITREE_GO2_CFG`。好处是整条链路可控、参数可追溯到
+   `assets/go2_reference.json`；代价是驱动增益（kp=60 / damping=**3.6**）必须在
+   `env_cfg.py` 里显式写回，见 RUNBOOK §2。
+3. **跨仿真器不能续训**：PhysX 和 MuJoCo 的接触模型不同（摩擦锥、脚底 `condim`、
+   `priority`），不是同一个物理的两种实现。`--resume` 会直接拒绝 `.zip`。
+   曲线只能比趋势，不能比数值。
+4. **没有独立的评估环境**：Isaac 里再起一个物理场景太贵，改成在训练环境里顺带统计
+   （`mdp/metrics.py:EpisodeTracker`），口径和 `EvalMetricsCallback` 逐项对齐。

@@ -29,6 +29,14 @@
 │   ├── train.py          PPO 训练入口
 │   ├── play.py           回放/部署
 │   └── diag.py           薄壳：把 go2_sac.diag.load_policy 换成 PPO.load 后转发（实现只有一份）
+├── go2_issac/            ← 同一任务迁到 Isaac Sim（算法换 rsl_rl，资产自己转 USD）
+│   ├── course.py         地形几何唯一真源，纯 numpy（**不 import mujoco / isaaclab**）
+│   ├── core.py           观测 / 14 项奖励 / 终止判据，纯 torch（同上）
+│   ├── tests/            本机可跑的逐位对拍：course_parity / core_parity
+│   ├── assets/           从编译后的 MjModel 导出的资产真值与静置真值（本机跑，产物进 git）
+│   ├── convert_assets.py MJCF -> USD（**只能上机**）
+│   ├── env_cfg.py mdp/ agents/ train.py play.py smoke.py   （**只能上机**）
+│   └── RUNBOOK.md        上机手册：装机、转换、自检、训练
 ├── ctrl/                 ← 本仓库自己的代码
 │   ├── go2_ctrl.py       Go2Ctrl：DDS 收发 + 500 Hz 独立线程 + 插值平滑 + reset
 │   └── ctrl_test.py      DDS 手动测试
@@ -85,6 +93,21 @@ python3 -m go2_sac.play --mode dds --model models/xxx/model.zip   # 另开 unitr
 python3 -m go2_ppo.train --terrain flat --steps 200000 --checkpoint-freq 40000
 python3 -m go2_ppo.play  --mode viewer --model models/go2_ppo_flat_xxx/model.zip
 ```
+
+```bash
+# Isaac Sim：同一套任务，算法换 rsl_rl、资产自己转。**这几条只能在有 NVIDIA 显卡的机器上跑**
+python3 -m go2_issac.tests.course_parity     # ← 这两条本机就能跑（对拍）
+python3 -m go2_issac.tests.core_parity
+python3 go2_issac/convert_assets.py
+python3 go2_issac/smoke.py --all --num-envs 4
+python3 go2_issac/train.py --terrain flat --steps 200_000 --num-envs 512 --headless
+python3 go2_issac/play.py --resume models/go2_issac_flat_xxx
+```
+
+`go2_issac/train.py` 的 CLI 比上面两个**少得多**：`--terrain --terrain-scale --action-scale
+--steps --num-envs --seed --save-dir --resume --privileged --mini-batches --max-iterations`。
+PPO 超参一律不进 CLI，全在 `agents/rsl_rl_ppo_cfg.py`——那里只有一份默认值，
+不会和 `go2_ppo/config.py` 漂移。上机步骤见 `go2_issac/RUNBOOK.md`。
 
 `go2_sac.train` 的 CLI：`--terrain --scene --steps --n-envs --seed --save-dir --resume --privileged
 --reset-x LO HI --terrain-scale --action-scale --learning-rate --target-entropy --gradient-steps
@@ -409,6 +432,63 @@ SAC 那份的 `log_interval=4` 是"每 4 个结束的回合记一次"；PPO 的�
 
 ---
 
+### G. Isaac Sim 迁移（`go2_issac/`）
+
+**G0 —— 当前开发机跑不了 Isaac Sim，这不是"配置问题"是硬件。**
+`nvidia-smi` 不存在、只有 AMD HawkPoint1 核显、内存 27 GB（要 ≥32）、
+`/` 剩 21 GB（要 ~50）、Python 3.10.12（要 3.11）。**Isaac Sim 没有 CPU 回退**——
+`--cpu` 只是"用 CPU 跑张量"，物理和渲染照样要 GPU。别在这台机器上试装。
+所以 `go2_issac/` 刻意分两层：语义层（本机可证明）+ 接线层（只能上机）。
+这是没有显卡时唯一能把风险压下去的办法，**不要为了"统一"把语义层搬进 `mdp/`**——
+那样它就跟着 isaaclab 一起变成不可测的了。
+
+**G1 —— 增益不在 USD 里，MJCF 转换器不管这件事。**
+`default_drive_stiffness` 是 **URDF** 转换器的字段，MJCF 那边没有。
+`go2.xml` 的 `<motor>` 只变成 USD 的 DriveAPI，kp/kd 必须由 `ImplicitActuatorCfg` 在
+实例化时写回。而且 `damping` 要写 **3.6 不是 kd=3.5**：MuJoCo 的 12 个铰链自己带
+`damping=0.1`，Isaac 的隐式执行器只有 `damping` 一个旋钮，两个要加起来
+（依据：`assets/go2_reference.json` 的 `joints[].damping`，实测 0.1）。
+
+**G2 —— 关节顺序有三个，只认名字不认下标。**
+MJCF 的 `qpos` 跟身体树（FL,FR,RL,RR）、执行器/DDS 是 FR,FL,RR,RL、USD 里是导入顺序。
+`mdp/state.py` 里 `JOINT_NAMES` 显式写死成 DDS 顺序，然后按名字查下标，启动时断言 12 个
+名字全都对得上。**动作也要按名字重排一次**（`raw_action`）：动作项内部的顺序来自
+`find_joints`（= USD 顺序），和 `State.q/dq/tau` 用的 DDS 顺序不一定一样，错了不报错、
+只是学不出来。同理不依赖 `preserve_order` 这个字段（老版本没有）。
+
+**G3 —— `prev_action` 必须是"夹过之后"的动作。**
+`env.py:194` 是 `action = clip(action); self.prev_action = action`——先夹再存。
+Isaac 的 `ActionTerm.raw_actions` 是"网络吐出来的原值"，夹取只改 `processed_actions`。
+所以 `state.raw_action()` 里**自己再夹一次**。这不是边角情况：策略初始 σ=1.0，
+约 1/3 的动作 `|a|>1`，不夹的话观测里的"上一拍动作"和 MuJoCo 侧系统性对不上。
+
+**G4 —— 地形的坐标偏移只能上机校准，而且只影响一个常量。**
+Isaac Lab 把 patch 的**中心**写进 `env.scene.env_origins`，但"中心"这个说法在版本之间
+变过。做法不是猜，是 `smoke.py --check-terrain` 反推：对不上只改
+`course.py:COURSE_ORIGIN_FROM_ENV_ORIGIN`。同理高度场的 `horizontal_scale`/`vertical_scale`
+也要验（0.7 档的台阶高度恰好是 `vertical_scale` 的整数倍，量化误差 ≤0.5 mm）。
+
+**G5 —— 跨仿真器不能续训，这是物理决定的。**
+MuJoCo 是 `elliptic` 摩擦锥 + `impratio=100`、脚底 `condim=6`（带扭转/滚动摩擦）、
+`priority=1` 独占接触对；PhysX 是各向同性库仑摩擦、没有 priority。
+**是两个不同的物理**，不是同一个物理的两种实现。所以 `go2_ppo` 的 `.zip` 与 Isaac 的 `.pt`
+互不通用（`train.py --resume` 会直接拒绝 `.zip`），曲线只能比趋势不能比数值。
+`go2_common/` 那份代码仍然只有一份——变的是仿真器，不是任务定义。
+
+**G6 —— rsl_rl 的超参名和 SB3 全不一样，映射表是唯一来源。**
+见 `agents/rsl_rl_ppo_cfg.py` 的模块注释。几个**语义**上等价但容易记错的：
+`gae_lambda`→`lam`、`ent_coef`→`entropy_coef`、`batch_size`→`num_mini_batches`（条数→份数）、
+`log_std_init=0` ⇔ `init_noise_std=1.0`、`target_kl` 早停 ⇔ `schedule="adaptive"+desired_kl`。
+另外 rsl_rl 的 `use_clipped_value_loss` **默认是 True**，而这边一直是"不裁 value"，
+所以必须显式关掉（默认真空两边相反，最容易静默出错）。
+
+**G7 —— 超时走 `truncated` 这件事在 Isaac 里叫 `time_out=True`。**
+终止项的**名字**必须是 `time_out` 且带 `time_out=True`，rsl_rl 才会把它填进
+`extras["time_outs"]` 做 bootstrap。写成普通终止项 = 超时处价值被截断，和 `env.py` 的
+`truncated` 语义相反（第 4 节不变量 8）。
+
+---
+
 ## 6. 实测数据（回答"这机器人能做多难"）
 
 ### 6.1 `action_scale` 是几何约束，不是调参
@@ -509,6 +589,18 @@ Q 只学到"站着最好"，actor 永远不迈腿。
 - 上面所有关于"能爬多高""怎么调超参"的结论**全部来自 SAC**，不能当成 PPO 的；
 - PPO 没有预热，它的起点就是 σ=1.0 的随机策略（实测空跑时回合回报 −20.8、几乎原地就摔），
   能不能像 SAC 那样从零走起来，**没有数据**，要试就从平地那一级开始。
+
+**Isaac Sim 通道**（`go2_issac/`）：**一次都没跑过**，因为这台机器没有 NVIDIA 显卡
+（硬件级别的跑不了，见 §5-G0）。能做到的保证和不能做的保证都写清楚：
+
+- **已经用真 MuJoCo 对拍验过的**（本机可跑，全绿）：`course.py` 的地形几何、
+  `core.py` 的 45/46 维观测、14 项奖励、终止与成功判据——逐元素差别在 1e-15
+  级（浮点求和顺序）。资产真值（质量 15.206408 kg、前后腿不同的关节限位、
+  `damping=0.1`、脚底球 `priority=1`/`friction=0.4`）是从编译后的 `MjModel` 直接导出的。
+- **完全没验过的**：PhysX 物理本身、Isaac API 的接线、训练能不能收敛。
+  这三件事只能上机，`smoke.py --all` 就是为它们准备的（五节，一节一个结论）。
+- 所以：**上机后如果 `smoke.py` 全绿而训练不收敛，那不是"代码写错了"，
+  是这套接触动力学要不要重调奖励/超参的问题**——和当年在 MuJoCo 上从零开始面对的是同一类问题。
 
 **没上去的**：**真实的 0.15~0.17 m 台阶**。现有 A=0.7 步态在任何振幅下都够不到（见 6.2）。
 
