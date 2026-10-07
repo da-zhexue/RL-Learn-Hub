@@ -1,3 +1,9 @@
+#ssh免密连接
+# 查看本机的公钥
+# cat ~/.ssh/id_rsa.pub # 本机运行
+# 将输出的公钥内容复制到目标机器的 ~/.ssh/authorized_keys 文件中
+# echo "AAA" >> ~/.ssh/authorized_keys # 目标机器运行
+
 nvidia-smi
 sudo apt update && sudo apt upgrade
 sudo apt install nano

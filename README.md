@@ -1,20 +1,39 @@
 # 机器人强化学习运控
   
-本仓库以宇树机器人与机器狗为例进行强化学习运控的学习。
+本仓库以宇树机器人与机器狗为例进行强化学习运控的学习。强化学习算法理论学习参考[Hands On Modern RL](https://walkinglabs.github.io/hands-on-modern-rl/preface/introduction)。
 
-## 环境
-本仓库在以下环境验证通过（Ubuntu 22.04 + conda 虚拟环境 + ROS 2 Humble）：
+## 目标
+主要目标为多种强化学习运控算法实践与Issac Sim的使用。
+| 目标 | 完成 |
+| --- | --- |
+| SAC训狗上台阶 | ✅ |
+| Issac Sim中PPO训狗 |  |
+| Model Base的强化学习算法训狗 |  |
+| WBC传统控制人形机器人跑步 |  |
+| SAC人形机器人跑步 |  |
+| PPO人形机器人跑步 |  |
 
+## 本地环境
 | 组件 | 版本 |
 | --- | --- |
-| 操作系统 | Ubuntu 22.04.5 LTS (jammy)，内核 6.8.0-138-generic |
+| 操作系统 | Ubuntu 22.04.5 LTS (jammy) |
 | ROS 2 | Humble |
-| Python | 3.10.12（conda 环境 `sim`） |
+| Python | 3.10.12（conda 环境） |
 | unitree_sdk2_python | 1.0.1 |
 | unitree_ros2 | 0.3.0 |
 | mujoco (pip) | 3.10.0 |
 | cyclonedds (pip) | 0.10.2 |
 | numpy | 1.26.4 |
+
+## 云端环境
+| 组件 | 版本 |
+| --- | --- |
+| 显卡 | Nvidia RTX 4090 |
+| 操作系统 | Ubuntu 24.04.5 LTS |
+| Python | 3.11（conda 环境） |
+| CUDA | 13.2 |
+| Issac Sim | 5.1.0 |
+| Issac Lab | 2.3.0 |
 
 ## 宇树运行环境配置
 下载仓库（本仓库所用python和ros2进行开发）
@@ -103,35 +122,106 @@ go2_ppo/*.py               同上，把算法换成 PPO
 ```
 
 ### 训练
+
+#### 参数
+
+**SAC / PPO 共用**
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `-h, --help` | — | 打印这份列表本身 |
+| `--terrain {flat,steps,full}` | `full` | 课程阶段。`--resume` 且不给时，沿用模型自己的地形 |
+| `--scene XML` | 自带的 `scene.xml` | 场景 xml 路径 |
+| `--steps N` | `3_000_000` | 训练步数。从头训是总量，`--resume` 时是本级再练多少 |
+| `--n-envs N` | `8` | 并行环境数。SAC 下买的是多样性不是速度；PPO 下一轮 rollout = `n_steps × n_envs` |
+| `--seed N` | `0` | 随机种子 |
+| `--save-dir DIR` | 见左 | 默认 `models/go2_sac_<地形>[_s<缩放>]_<时间戳>/`（PPO 则是 `go2_ppo_...`） |
+| `--resume PATH` | 无 | 接着训，`.zip` 可省略；会读它同目录（找不到就往上一层找）的 `config.json`。PPO 只能续 PPO 自己的模型 |
+| `--privileged` | 关 | 观测里加 1 维机身离地高度（真机上没有，仅作对照）：45 维 → 46 维 |
+| `--reset-x LO HI` | `-0.3 0.3` | 起点 x 的随机范围，例如 `--reset-x 1.20 2.05` 直接练爬台阶 |
+| `--terrain-scale S` | `1.0` | 地形高度整体缩放（课程用）：`1.0`=原场景、`0`=平地。x/y 脚印不变，只压矮高度 |
+| `--action-scale A` | `0.6` | 关节目标幅度 `q_target = q_default + A·a`，决定能跨多高的槛。续训要么显式给、要么确认和上次一致 |
+| `--learning-rate LR` | `3e-4` | 微调时调小（如 `1e-4`）。续训不显式给会被 checkpoint 的值静默覆盖 |
+| `--fresh-reward` | 关 | 续训时不沿用 checkpoint 里的奖励权重，改用当前 `RewardCfg` 的默认值。换课程阶段必须加|
+| `--eval-freq N` | `50_000` | 每 N 个环境步评估一次|
+| `--eval-episodes N` | `20` | 每次评估跑几个回合。|
+| `--checkpoint-freq N` | `200_000` | 每 N 个环境步存一个 checkpoint |
+| `--torch-threads N` | `8` | 父进程 torch 的线程数（各子进程固定 1 线程跑物理） |
+
+**SAC 专属**
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--target-entropy H` | `-6.0` | 目标熵。SB3 默认 `-12` 对 12 维动作过强，会把探索压没（见 AGENT.md §6.4） |
+| `--gradient-steps G` | `-1` | 每收集一轮（= `train_freq × n_envs` = 8 个环境步）做几次梯度更新。`-1` = 标准的 UTD=1（见 AGENT.md §5-A4） |
+| `--seed-trot N` | 看情况 | 用 N 条开环小跑轨迹预热 replay buffer；`0` = 关闭。从头训练默认开（30 条），续训默认关——预热喂的手调小跑比已经会走路的策略差得多（见下面[预热](#预热)一节） |
+
+**PPO 专属**
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--n-steps N` | `256` | 每个环境每轮 rollout 采多少步。别用 SB3 默认的 2048：50 Hz 下那是 41 s，比整个回合（20 s）还长 |
+| `--batch-size B` | `256` | minibatch 大小。建议取 `n_steps × n_envs` 的约数，否则最后一批是零头 |
+| `--n-epochs E` | `5` | 每轮 rollout 的数据重复训几遍 |
+| `--ent-coef C` | `0.005` | 熵奖励系数。PPO 初始 σ=1.0，熵不是主旋钮 |
+| `--target-kl KL` | `0.02` | 早停阀：单次更新的 `approx_kl` 超过 1.5×它，本轮剩下的 epoch 全停 |
+
+加了 `--resume` 之后，环境侧的`terrain / scene / reset_x / terrain_scale / action_scale / privileged` 和奖励权重会先整个从 checkpoint 同目录的 `config.json` 里恢复，命令行显式给了才覆盖（`--fresh-reward` 则把奖励权重换回当前默认值）；`--steps` 也从「总量」变成「本级再练多少」。
+
+#### 预热
+写死一个开环小跑的动作并录制数据进行训练，防止陷入卡住不动的局部最优解，让狗学会跑起来分可以更高。  
+从头练默认预热，续练默认不预热，想要修改通过--seed-trot设置。
+
+#### 课程
+课程设置将原先较复杂的任务拆分为难度逐渐递增的任务，比如先学会平地跑，再学会上矮台阶，再学上高台阶，最后再跑完整任务。课程可以减少训练步数，降低落入局部最优解的可能。  
+  
 从头训：
 ```
-python3 -m go2_sac.train --terrain flat --steps 200_000 --checkpoint-freq 40_000     # 先学会在平地小跑
+bash sac_train.sh
+```
+或者等价为
+```
+python3 -m go2_sac.train --terrain flat --action-scale 0.6 \
+    --steps 200_000 --checkpoint-freq 50_000     # 先学会在平地小跑
 ```
 然后跑地形课程（从上面那个平地模型出发，逐级放开地形）：
 ```
-./run_curriculum.sh models/go2_sac_flat_xx/checkpoints/rl_600000_steps.zip
+python3 -m go2_sac.train --terrain steps --terrain-scale 0.70 --action-scale 0.6 \
+    --learning-rate 2e-4 --fresh-reward --steps 250_000 \
+    --save-dir models/go2_sac_steps_s0.70 --resume models/go2_sac_flat_xx/...
+python3 -m go2_sac.train --terrain steps --terrain-scale 0.86 --action-scale 0.6 \
+    --learning-rate 2e-4 --fresh-reward --reset-x -0.3 0.95 --steps 250_000 \
+    --save-dir models/go2_sac_steps_s0.86 --resume models/go2_sac_steps_s0.70/model.zip
+python3 -m go2_sac.train --terrain steps --terrain-scale 1.00 --action-scale 0.6 \
+    --learning-rate 2e-4 --fresh-reward --reset-x -0.3 0.95 --steps 250_000 \
+    --save-dir models/go2_sac_steps_s1.00 --resume models/go2_sac_steps_s0.86/model.zip
 ```
-手工逐级等价于（`--steps` 是本级再练多少步）：
+
 ```
-python3 -m go2_sac.train --terrain steps --terrain-scale 0.70 --fresh-reward \
-    --steps 1_000_000 --resume models/go2_sac_flat_xx/...               # 5.6 cm 的槛
-python3 -m go2_sac.train --terrain steps --terrain-scale 0.86 --fresh-reward \
-    --reset-x -0.3 0.95 --steps 250_000 --resume models/cur_s070_steps/model.zip
-python3 -m go2_sac.train --terrain steps --terrain-scale 1.00 --fresh-reward \
-    --reset-x -0.3 0.95 --steps 1_000_000 --resume models/go2_sac_steps_s0.7_20261006_120850/checkpoints/rl_850000_steps.zip
-python3 -m go2_sac.train --terrain full  --terrain-scale 0.70 --fresh-reward \
-    --steps 1_000_000 --resume models/go2_sac_steps_20261006_143205/checkpoints/rl_1850000_steps.zip
-python3 -m go2_sac.train --terrain full  --terrain-scale 0.85 --fresh-reward \
-    --steps 1_000_000 --resume models/go2_sac_full_s0.7_20261007_101816/checkpoints/rl_2850000_steps.zip
-python3 -m go2_sac.train --terrain full  --terrain-scale 1.00 --fresh-reward \
-    --steps 1_000_000 --resume models/go2_sac_steps_20261006_143205/checkpoints/rl_1850000_steps.zip          
+python3 -m go2_sac.train --terrain full --terrain-scale 0.56 --action-scale 0.7 \
+    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 200_000 --checkpoint-freq 50_000 \
+    --save-dir models/go2_sac_full_s0.56 --resume models/go2_sac_steps_s1.00/model.zip  # 首级 0.095 m
+python3 -m go2_sac.train --terrain full --terrain-scale 0.62 --action-scale 0.7 \
+    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 250_000 --checkpoint-freq 50_000 \
+    --save-dir models/go2_sac_full_s0.62 --resume models/go2_sac_full_s0.56/model.zip   # 0.105 m
+python3 -m go2_sac.train --terrain full --terrain-scale 0.70 --action-scale 0.7 \
+    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 250_000 --checkpoint-freq 50_000 \
+    --save-dir models/go2_sac_full_s0.70 --resume models/go2_sac_full_s0.62/model.zip   # 0.119 m
+python3 -m go2_sac.train --terrain full --terrain-scale 0.78 --action-scale 0.7 \
+    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 250_000 --checkpoint-freq 50_000 \
+    --save-dir models/go2_sac_full_s0.78 --resume models/go2_sac_full_s0.70/model.zip   # 0.133 m
+python3 -m go2_sac.train --terrain full --terrain-scale 0.86 --action-scale 0.7 \
+    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 250_000 --checkpoint-freq 50_000 \
+    --save-dir models/go2_sac_full_s0.86 --resume models/go2_sac_full_s0.78/model.zip   # 0.146 m
+python3 -m go2_sac.train --terrain full --terrain-scale 0.93 --action-scale 0.7 \
+    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 300_000 --checkpoint-freq 50_000 \
+    --save-dir models/go2_sac_full_s0.93 --resume models/go2_sac_full_s0.86/model.zip   # 0.158 m
+python3 -m go2_sac.train --terrain full --terrain-scale 1.00 --action-scale 0.7 \
+    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 350_000 --checkpoint-freq 50_000 \
+    --save-dir models/go2_sac_full_s1.00 --resume models/go2_sac_full_s0.93/model.zip   # 原尺寸 0.170 m
 ```
-- `--resume` 接上一阶段：`.zip` 可省略，`checkpoints/rl_xxx` 这种路径也行
-  （`config.json` 会自动往上找一层）；**换阶段必须显式写 `--terrain`**，
-  否则沿用被续训模型自己的。
-- `--steps` 续训时是**本阶段再练多少步**，不是累计目标。
-- **换阶段必须加 `--fresh-reward`**，否则续训会把 checkpoint 里的旧奖励权重整个恢复回来。
-- 从头训练会自动用小跑数据预热 replay buffer（不用管）；**续训默认不预热**（`--seed-trot 0`），要开就显式写。
+
+#### 训练过程查看
+```
+tensorboard --logdir /path/to/unitree/runs
+```
 
 ### 回放
 ```
@@ -181,110 +271,11 @@ python3 -m go2_sac.play --mode viewer --model models/go2_sac_full_xxx/model.zip
 4. **加新项之前先问"它能不能被刷"。** 被否掉的例子：`feet_air_time`（不加速度指令闸门时，原地踏步和
    冲下悬崖都能刷）、用 `Δbase_z` 当爬升（抬屁股就能刷）、`exp(-err²)` 形式的姿态奖励（站对了白拿）。
 
-### 预热
-SAC 配一个没有相位输入的前馈 MLP，要从逐维白噪声里"发现"周期步态是做不到的：自动熵系数会把噪声压到
-±0.06 rad，而能走起来的对角小跑需要 ±0.25 rad 的**相干**振荡。结果 replay buffer 里全是"站着"的转移，
-Q 只学到"站着最好"，actor 永远不迈腿（实测平均 vx 是指令的 0.00 倍）。
-
-做法是先用开环小跑（`train.trot_action`）采一批转移把 buffer 填上（SACfD），**只给 Q 一个起点**，
-策略之后仍然自由学习。
-- 从头训练**默认开**（`--seed-trot 30` + `--seed-rand 6`，不用管），采完立刻开始梯度更新，
-  不等 `learning_starts`；**续训默认关**——预热喂的手调小跑比一个已经会走路的策略差得多
-  （后腿抬不起来、没有航向控制），拿它当先验等于把好策略往回拽。
-- 实测效果：200k 步后平均 vx 从指令的 **0.00 倍变成 0.79 倍**。
-- **预热数据要重新标注奖励**（`POSTURE_TERMS` 置零）：开环小跳只驱动大腿和小腿、**没有髋关节**，
-  横向和航向物理上不可控、必然自转横漂；姿态项原样计费会让这批数据变成 **−0.286 分/步**，
-  而"站着不动"在新奖励下恰好是 0——预热反而教会 Q"小跳比站着差"，与意图完全相反。
-  置零后是 **+0.238 分/步**（小跳段 +0.283 / 站立 0）。
-- 小跑的幅度按**绝对关节摆幅**（0.24~0.40 rad）给、再除以 `action_scale` 折算成动作值，
-  这样换 `action_scale` 时喂的还是同一个物理步态。直接写动作幅度（曾用 0.6~1.0）会随 `action_scale`
-  一起放大——0.6 时摆幅冲到 0.6 rad，狗直接摔，采集量从 3.5 万条掉到 1.1 万条。
-
 ## GO2强化学习过地形（PPO）
 和上面那节的**唯一区别是算法**：环境、地形、奖励、观测、课程分级、命令行参数、`config.json`
 格式全都一样，`go2_common/` 里那份代码两边共用，只是模块名从 `go2_sac` 换成 `go2_ppo`。
 
-### 训练
-从头训：
-```
-python3 -m go2_ppo.train --terrain flat --steps 200_000 --checkpoint-freq 40_000      # 先学会在平地小跑
-```
-然后跑同样的地形课程（`--steps` 是本级再练多少步）：
-```
-python3 -m go2_ppo.train --terrain steps --terrain-scale 0.70 --fresh-reward \
-    --steps 1_000_000 --resume models/go2_ppo_flat_xx/checkpoints/rl_200000_steps.zip   # 5.6 cm 的槛
-python3 -m go2_ppo.train --terrain full --terrain-scale 1.00 --fresh-reward \
-    --steps 1_000_000 --resume models/go2_ppo_steps_xx/checkpoints/rl_1000000_steps.zip # 再加六级台阶
-```
-`--resume`、`--fresh-reward`、`--steps`、`--terrain-scale`、`--action-scale` 的语义与 SAC 那节完全一致
-（包括"换阶段必须显式写 `--terrain` 和 `--fresh-reward`"）。
-
-### 回放
-```
-python3 -m go2_ppo.play --mode viewer --model models/go2_ppo_full_xxx/model.zip
-python3 -m go2_ppo.play --mode dds    --model models/go2_ppo_full_xxx/model.zip   # 另开 unitree_mujoco.py
-```
-
-### 与 SAC 的差异
-1. **没有预热**：PPO 是 on-policy，每轮采完就丢掉，没有 replay buffer 可以先填（命令行也没有
-   `--seed-trot`）。PPO 也不太需要——它的初始探索噪声 σ=1.0，而 SAC 当年的死因是自动熵把 σ 压到 0.25。
-2. **超参不同**：`n_steps=256`（SB3 默认的 2048 在 50 Hz 下是 41 s，**比整个回合 20 s 还长**）、
-   `batch_size=256`、`n_epochs=5`、`ent_coef=0.005`、`target_kl=0.02`（approx_kl 超了就提前结束本轮更新）。
-   `gamma=0.995` / 学习率 / `net_arch` 与 SAC 相同。可用
-   `--n-steps --batch-size --n-epochs --ent-coef --target-kl` 临时改。
-3. **不能跨算法续训**：`--resume` 只能接同一个算法存出来的模型。
-4. **续训可以改 `--n-steps` / `--batch-size`**：rollout buffer 不存进 checkpoint，会按新值自动重建。
-
-## GO2强化学习过地形（Isaac Sim）
-把上面那套任务搬到 **NVIDIA Isaac Sim**：同样地形、同样 45 维观测、同样 14 项奖励、
-同样课程分级，但算法换成 **rsl_rl**、资产用仓库里的 `go2.xml` **自己转 USD**。
-
-> ⚠️ **当前这台开发机跑不了**：没有 NVIDIA 显卡（只有 AMD 核显），内存 27 GB、盘剩 21 GB，
-> 都低于 Isaac Sim 的最低要求——而它**没有 CPU 回退**。所以这一节写的代码要搬到有卡的机器上跑，
-> 步骤见 [go2_issac/RUNBOOK.md](go2_issac/RUNBOOK.md)。
-
-为了在没有显卡的情况下也能保证正确性，代码刻意分成两层：
-
-- **本机可证明的语义层**（纯 numpy / torch，不 import mujoco 也不 import isaaclab）：
-  `course.py` 地形几何、`core.py` 观测/奖励/终止判据。它们和真的 MuJoCo 环境**逐位对拍**
-  （`tests/course_parity.py`、`tests/core_parity.py`），差别在 1e-15（浮点求和顺序）。
-- **只能上机验证的接线层**：`env_cfg.py`、`mdp/`、`agents/`、`train.py` / `play.py` / `smoke.py`。
-
-所以上机后可能出错的只剩"Isaac API 接得对不对"，不会再有语义错误。
-
-### 目录
-```
-go2_issac/course.py            地形几何唯一真源（8 个方块 + 高程图），纯 numpy
-go2_issac/core.py              观测 / 14 项奖励 / 终止判据，纯 torch
-go2_issac/env_cfg.py           CourseEnvCfg（ManagerBasedRLEnvCfg）+ 地形生成
-go2_issac/mdp/                 rewards / observations / terminations / events / commands / metrics 薄壳
-go2_issac/agents/rsl_rl_ppo_cfg.py  rsl_rl 超参 = go2_ppo/config.py 的逐项映射
-go2_issac/convert_assets.py    go2.xml -> USD（在有卡的机器上跑）
-go2_issac/smoke.py             上机自检：资产/关节顺序/地形坐标/观测奖励/零动作静置
-go2_issac/train.py play.py     训练 / 回放
-go2_issac/assets/*.py          从编译后的 MjModel 导出资产真值与静置真值（本机跑，产物进 git）
-go2_issac/tests/*.py           和 MuJoCo 的逐位对拍（本机跑）
-go2_issac/RUNBOOK.md           上机手册
-```
-
-### 和有卡机器的交接
-本机能做的只有"把语义证明对"，剩下三步在那台机器上：
-
-```
-python3 go2_issac/convert_assets.py                       # 1. 转 USD
-python3 go2_issac/smoke.py --all --num-envs 4             # 2. 自检（别跳）
-python3 go2_issac/train.py --terrain flat --steps 200_000 --num-envs 512 --headless   # 3. 开训
-```
-
-### 与 MuJoCo 侧的差异
-1. **算法库换成 rsl_rl**：全程 GPU、没有 Python 逐环境循环，吞吐高两个数量级。
-   超参名全变了，映射表在 `agents/rsl_rl_ppo_cfg.py` 的模块注释里，改一边要照表同步。
-2. **资产自己转**：用仓库里的 `unitree_mujoco/unitree_robots/go2/go2.xml`，
-   **不用** Isaac Lab 官方给的 `UNITREE_GO2_CFG`。好处是整条链路可控、参数可追溯到
-   `assets/go2_reference.json`；代价是驱动增益（kp=60 / damping=**3.6**）必须在
-   `env_cfg.py` 里显式写回，见 RUNBOOK §2。
-3. **跨仿真器不能续训**：PhysX 和 MuJoCo 的接触模型不同（摩擦锥、脚底 `condim`、
-   `priority`），不是同一个物理的两种实现。`--resume` 会直接拒绝 `.zip`。
-   曲线只能比趋势，不能比数值。
-4. **没有独立的评估环境**：Isaac 里再起一个物理场景太贵，改成在训练环境里顺带统计
-   （`mdp/metrics.py:EpisodeTracker`），口径和 `EvalMetricsCallback` 逐项对齐。
+命令行参数直接看上一节的 [#### 参数](#参数)：共用那张表一字不差，把「SAC 专属」那三个
+（`--target-entropy` / `--gradient-steps` / `--seed-trot`）换成「PPO 专属」那五个
+（`--n-steps` / `--batch-size` / `--n-epochs` / `--ent-coef` / `--target-kl`）即可。
+训练、回放、奖励设置、课程分级各节的命令，把 `go2_sac` 改成 `go2_ppo` 同样成立。
