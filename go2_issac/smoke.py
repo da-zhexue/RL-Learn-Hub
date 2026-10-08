@@ -22,6 +22,7 @@ import argparse
 import json
 import pathlib
 import sys
+import traceback
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -43,9 +44,20 @@ def ok(cond: bool, msg: str, detail: str = "") -> bool:
 
 
 def close(a, b, tol: float) -> bool:
+    """标量或张量都算"接近"：张量要求**逐元素**都在容差内。
+
+    必须支持张量：`robot.actuators[...].stiffness/damping/effort_limit_sim` 是
+    (环境数, 关节数) 的张量，而 `float(张量)` 直接抛 TypeError——原来那一版于是把
+    "数值全对"的 kp/kd 报成 FAIL（torch 的报错里还带着一整块张量，看着像真出错）。
+    """
     try:
         return abs(float(a) - float(b)) <= tol
     except (TypeError, ValueError):
+        pass
+    # 张量路径：不 import torch，直接用对方的算符（cuda 张量、numpy 数组都能走）
+    try:
+        return bool(((a - b).abs() <= tol).all())
+    except (TypeError, ValueError, RuntimeError, AttributeError):
         return False
 
 
@@ -120,19 +132,33 @@ def check_asset(env, args) -> None:
     robot = env.scene["robot"]
 
     # --- 总质量
-    mass = float(robot.root_physx_view.get_masses().sum())
+    # **只看 env 0 那一行**：`get_masses()` 的形状是 (环境数, 连杆数)，整体 `.sum()`
+    # 会顺手把环境数乘进去（4 个环境 19.2→76.8 kg，看着像"质量差了 5 倍"，其实只是求和范围错了）。
+    masses_all = robot.root_physx_view.get_masses()
+    if len(robot.body_names) != masses_all.shape[1]:
+        return ok(False, "各连杆质量",
+                  f"body_names {len(robot.body_names)} 个 vs 质量矩阵列数 {masses_all.shape[1]}，"
+                  f"下面的按名字对照不可信")
+    mass = float(masses_all[0].sum())
     ok(close(mass, ref["total_mass"], 1e-3), "总质量",
        f"USD {mass:.5f} kg vs 真值 {ref['total_mass']:.5f} kg")
 
     # --- 每个连杆的质量
     names = list(robot.body_names)
-    masses = robot.root_physx_view.get_masses()[0].tolist()
+    masses = masses_all[0].tolist()
     by_name = dict(zip(names, masses))
     bad = []
     for b in ref["bodies"]:
-        if b["id"] == 0 or b["mass"] <= 0:
-            continue          # world 和零质量的 FL_foot 之类，PhysX 那边没有对应
-        if b["name"] not in by_name:
+        if b["id"] == 0:
+            continue          # world 没有对应的刚体
+        if b["mass"] <= 0:
+            # **零质量的也要查**：PhysX 不接受 0 质量，导入时会"按密度×碰撞体积"补一个出来
+            # （实测每个 *_foot 被补成 1.0 kg，整机 15.2→19.2 kg，+26%）。
+            # 只比对"真值>0"的连杆，这整类偏差是**看不见**的。
+            got = by_name.get(b["name"], 0.0)
+            if got > 1e-3:
+                bad.append(f"{b['name']}: 真值 0 kg（MuJoCo 里是无质量点），USD 里是 {got:.5f} kg")
+        elif b["name"] not in by_name:
             bad.append(f"{b['name']} 在 USD 里找不到")
         elif not close(by_name[b["name"]], b["mass"], 1e-4):
             bad.append(f"{b['name']}: USD {by_name[b['name']]:.5f} vs 真值 {b['mass']:.5f}")
@@ -201,10 +227,12 @@ def check_order(env, args) -> None:
        f"越界的是 {[state.JOINT_NAMES[i] for i in (~inside).nonzero().tolist()]}")
 
     # 2) 动作项和 state 用的是同一批关节
+    #    动作项没有公开的 `joint_names`（只有 `_joint_names`），用 state 里那个兼容取法
     term = env.action_manager.get_term("joints")
-    ok(list(term.joint_names) == list(state.JOINT_NAMES),
+    got_names = state.action_joint_names(term)
+    ok(got_names == list(state.JOINT_NAMES),
        "动作项的关节顺序 = JOINT_NAMES",
-       f"动作项是 {list(term.joint_names) if list(term.joint_names) != list(state.JOINT_NAMES) else '一致'}"
+       f"动作项是 {got_names if got_names != list(state.JOINT_NAMES) else '一致'}"
        "（不一致也没关系，raw_action 会按名字重排，但这里报出来更好查）")
 
     # 3) 走一步已知动作，验"动作 -> 关节目标"和 `env.py:197` 同式，并且 prev_action 追得上
@@ -229,7 +257,9 @@ def check_order(env, args) -> None:
        "观测里的动作位（prev_action）= **夹过之后**的下发动作",
        f"实得 {st.prev_action[0].tolist()}\n"
        f"         期望 {probe_clamped[0].tolist()}\n"
-       "         对不上优先查两处：mdp/observations.py 的推进时机、mdp/state.py:raw_action 的 clamp")
+       "         对不上优先查三处：①这一拍是不是发生了 reset（重置会清空 raw_actions，"
+       "而观测在重置之后才算——见 --sanity 的「出生后第一拍不终止」）、"
+       "②mdp/observations.py 的推进时机、③mdp/state.py:raw_action 的 clamp")
 
     # 4) 站姿：零动作几秒后离地高度应该接近 MuJoCo 的 0.2676 m（这一步不算物理，
     #    真正的物理比对在 --drop-test）
@@ -277,9 +307,11 @@ def check_terrain(env, args) -> None:
     print("       （高程图内容靠 `--drop-test` 反推：它把狗放在几个已知 x 上，"
           "量落点高度和 `CourseHeight.top` 之比）")
 
-    # 高程图的实际规模（算内存用）
-    rows, cols = env.cfg.terrain.terrain_generator.num_rows, \
-        env.cfg.terrain.terrain_generator.num_cols
+    # 高程图的实际规模（算内存用）。注意路径是 `cfg.scene.terrain`：
+    # `terrain` 是 scene cfg 上的成员（`TerrainImporterCfg` 只在那儿才被认），
+    # 写在 env cfg 顶层是静默失效（见 `env_cfg.CourseSceneCfg.terrain`）。
+    rows, cols = env.cfg.scene.terrain.terrain_generator.num_rows, \
+        env.cfg.scene.terrain.terrain_generator.num_cols
     px = int(course.PATCH_SIZE[0] / course.HORIZONTAL_SCALE)
     print(f"       {rows}×{cols} 个 patch，整张高程图 {rows * px}×{cols * px} 像素 "
           f"({rows * px * cols * px * 2 / 2**20:.0f} MB, int16)")
@@ -304,7 +336,10 @@ def check_sanity(env, args) -> None:
     st = state.get_state(env)
 
     # 1) 观测维度
-    obs = env.observation_manager.compute()
+    #    `compute()` 返回的是**按组名分的 dict**（`{"policy": (N,45), ...}`），不是张量；
+    #    组名就是 `env_cfg.CourseObservationsCfg` 里那个属性名。少了 `["policy"]`，
+    #    下面拿到的就是 dict，`.shape` 直接 AttributeError。
+    obs = env.observation_manager.compute()["policy"]
     want = obs_dim(ctx.cfg.privileged)
     ok(tuple(obs.shape) == (env.num_envs, want), "观测维度",
        f"实得 {tuple(obs.shape)}，期望 ({env.num_envs}, {want})")
@@ -331,23 +366,33 @@ def check_sanity(env, args) -> None:
        f"最大差 {float((rw - total).abs().max()):.2e}")
 
     # 5) 终止：超时要走 truncated（rsl_rl 靠它 bootstrap），不是 terminated
+    #    Isaac 原生返回 5 元组 (obs, rew, terminated, truncated, extras)，
+    #    rsl_rl 那边由 `train.py` 换成 4 元组——这一节验的是**裸 env**，所以按 5 元组看。
     t = env.termination_manager
     ok(hasattr(t, "time_outs"), "termination_manager 有 time_outs（超时单独一路）")
     zero = torch.zeros(env.num_envs, 12, device=env.device)
-    n_reset = 0
+
+    # 5a) **出生那一拍不能终止**。四个判据（`core.is_*`）都是用**课程系**算的，
+    #     而 `reset_base` 把狗放在课程 x≈0 处；只要 `state.get_state` 忘了把
+    #     `root_pos_w` 换成课程系，`out_of_course`（x < -1.0，出生点是 world x≈-1.5）
+    #     在出生那一拍就成立 → **每步都终止、每步都重置**：prev_action 恒为 0
+    #     （重置清空 raw_actions，而观测在重置之后才算）、progress 奖励每步白拿一次
+    #     "出生点位移"、落地高度永远停在出生高度。这四条检查各自单看都像"别的问题"，
+    #     所以在这里钉一条最直接的。
+    env.reset()
+    _, _, terminated, _, _ = env.step(zero)
+    fired = [n for n in t.active_terms if bool(t.get_term(n).any())]
+    ok(not bool(terminated.any()), "出生后第一拍不终止（出生点在课程内）",
+       f"出生就终止的项：{fired}（这项非空时先查 `state.get_state` 的 base_pos 是不是"
+       "课程系，以及 `events.reset_base` 写进仿真的出生点）")
+
+    # 5b) 超时：数的是 `reset_time_outs` 这一路，**不能数 done 的总数**——
+    #     两者混在一起的话，"每步都终止"也会让这条变绿（实测踩过：4800 次 = 1200 步 × 4 环境）。
+    n_timeout = 0
     for _ in range(1200):          # 20 s 上限 = 1000 步，跑够就能看到一次超时
-        _, _, dones, _ = _step(env, zero)
-        n_reset += int(dones.sum())
-    ok(n_reset > 0, "零动作跑满 20 s 会因超时重置", f"{n_reset} 次")
-
-
-def _step(env, action):
-    """走一步，返回 rsl_rl 口径的 4 元组（Isaac 原生是 5 元组）。"""
-    out = env.step(action)
-    if len(out) == 5:
-        obs, rew, terminated, truncated, _info = out
-        return obs, rew, torch.logical_or(terminated, truncated), _info
-    return out
+        _, _, _, truncated, _ = env.step(zero)
+        n_timeout += int(truncated.sum())
+    ok(n_timeout > 0, "零动作跑满 20 s 会因超时重置", f"超时 {n_timeout} 次")
 
 
 # ==================================================================== 落地
@@ -422,6 +467,11 @@ NEEDS_ENV = ("asset", "order", "terrain", "sanity", "drop")
 
 
 def main() -> int:
+    # stdout 接管道时是块缓冲，而收尾的 `app.close()` 会直接结束进程，缓冲区里的东西全丢。
+    # 在终端里跑没事（行缓冲），`python smoke.py --all > log` 就会只剩 Kit 的日志——
+    # 和 RUNBOOK §3 那条"安静退出"是同一个坑，只是这次丢的是正常的 ok/FAIL 行。
+    sys.stdout.reconfigure(line_buffering=True)
+
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     for name in SECTIONS:
         ap.add_argument(f"--check-{name}", action="store_true")
@@ -476,6 +526,13 @@ def _run_with_kit(args, sections) -> None:
                 SECTIONS[name](env, args)
         finally:
             env.close()
+    except BaseException:
+        # 必须在这里打：finally 里的 app.close() 会把进程直接结束掉（退出码 0、无任何输出），
+        # 异常冒泡上去就没机会打印了。和 convert_assets.py 是同一个坑。
+        # 记进 _failures 而不是往外抛——抛出去就走不到 main() 的收尾，退出码也就成 0 了。
+        traceback.print_exc()
+        sys.stderr.flush()
+        _failures.append("建环境/自检过程中抛异常，见上面的 traceback")
     finally:
         if app is not None:
             app.close()

@@ -90,6 +90,22 @@ class CourseSceneCfg(InteractiveSceneCfg):
 
     robot: ArticulationCfg = ArticulationCfg(
         prim_path="{ENV_REGEX_NS}/Robot",
+        # MJCF 转出来的 USD 里带了**两个** `ArticulationRootAPI`（上机 dump 出来的）：
+        #   /go2/base_link/base_link   躯干刚体——浮动基座的根就该是它
+        #   /go2/worldBody             MJCF 那个空的 `<worldbody>` 残留
+        # Isaac Lab 默认会在 `prim_path` 底下**找**那唯一的根，发现两个直接报错
+        # （`articulation.py:1491` `Failed to find a single articulation ... Found multiple`）。
+        # 这里把它指死，别去改 USD：`articulation_root_prim_path` 就是为这种情况留的，
+        # 而且它同时决定了下面 `articulation_props`（solver 迭代、自碰撞）写在哪。
+        #
+        # 为什么是 base_link 而不是 worldBody：PhysX 的关节树只能顺着 prim 往下长，
+        # 而 `worldBody` 是 `base_link` 的**兄弟**不是祖先，挂它底下一个刚体都找不到。
+        # 官方口径也是这句（`schemas.py:85`）："For floating articulations, this should be
+        # on the root body."——基座浮动，根必须在刚体上。
+        #
+        # 顺带：这层"多一个根"只在 `--check-asset` 的碰撞几何个数对不上时才会想歪，
+        # 报错却是"找不到单个 articulation"，见到就往这里看。
+        articulation_root_prim_path="/base_link/base_link",
         spawn=UsdFileCfg(
             usd_path=GO2_USD,
             # 不打开自碰撞：MuJoCo 侧也没开，开了之后大腿和机身会互顶，行为差很多
@@ -133,13 +149,32 @@ class CourseSceneCfg(InteractiveSceneCfg):
     )
 
     #: 撞地形要扣分的那部分接触力（`reward_collision`）。脚底不算——脚本来就要碰地。
+    #:
+    #: `base_link/` 那一层**不能省**。Isaac 的路径通配是"一层一个 token"：
+    #: `sim_utils.find_matching_prims` 把表达式按 `/` 切开，每个 token 编译成
+    #: `^token$` 只跟**一个** prim 的名字比（`sim/utils.py:730-746`），
+    #: `.*` 匹配的是"这一层里任意叫什么"的名字，**不跨 `/`**。
+    #: 所以写 `Robot/.*` 只会命中 `Robot` 的 4 个直接子节点
+    #: （`base_link`、`joints`、`Looks`、`worldBody`），一个刚体都没有，
+    #: 接着 `contact_sensor.py:262` 报 "could not find any bodies with contact reporter API"。
+    #: 官方 URDF 资产生效是因为那边刚体**就是** root 的直接子节点（`/anymal_c/LF_HIP`）；
+    #: MJCF 转出来的多包了一层 `base_link/`（刚体在 `/Robot/base_link/<body>`），
+    #: 照抄官方那行就正好差一层。实测（`/tmp/probe_contact.py`）加回这层后 17 个刚体全部命中。
     contact_forces: ContactSensorCfg = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        prim_path="{ENV_REGEX_NS}/Robot/base_link/.*",
         history_length=0,
         track_air_time=False,
         # 只要"和地形之间的"接触：MuJoCo 那边也是按 `geom_bodyid == 0` 筛的
         filter_prim_paths_expr=[TERRAIN_PRIM],
     )
+
+    #: 地形 importer。**必须挂在 scene 上**：Isaac Lab 只扫 **scene** cfg 的成员找地形
+    #: （`interactive_scene.py` 里那句 `isinstance(asset_cfg, TerrainImporterCfg)`），
+    #: 挂到 env cfg 上是**静默失效**——不报错，但地形根本不生成、`env.scene.terrain is None`、
+    #: `env_origins` 悄悄退回默认网格（于是整条课程坐标映射全错）。
+    #: 内容由 `CourseEnvCfg.__post_init__` 填：patch 的行列数要按 `num_envs` 算，
+    #: 写不成类属性默认值。
+    terrain: TerrainImporterCfg | None = None
 
 
 @configclass
@@ -149,20 +184,42 @@ class CourseActionsCfg:
     joints = course_actions.ClippedJointPositionActionCfg(
         asset_name="robot",
         joint_names=list(state.JOINT_NAMES),
+        # **`preserve_order` 必须开**：默认 False 时 `find_joints` 会把解析出来的下标
+        # **按资产里的顺序排**，给进来的名字顺序被丢掉——实测动作项变成了
+        # `FL, FR, RL, RR × hip/thigh/calf`（USD 导入顺序），而 `JOINT_NAMES` 是
+        # `FR, FL, RR, RL × ...`（DDS 顺序）。动作写进关节目标这一路自己是自洽的
+        # （`_joint_ids` 和 `_joint_names` 配套），但 `state.raw_action` 要按名字
+        # 把它重排回 DDS 顺序才能和 `q/dq/tau`、和 MuJoCo 侧对齐——
+        # 与其依赖那一次重排（多一处可能漏掉的地方），不如这里就让顺序一致。
+        preserve_order=True,
         scale=_REF.action_scale,
         use_default_offset=True,
     )
 
 
 @configclass
-class CourseObservationsCfg:
-    """**一个 term 装下 45 维**（理由见 `mdp/observations.py`）。"""
+class CoursePolicyObsCfg(ObservationGroupCfg):
+    """`policy` 这一个组，里面只有 1 个 term——**一个 term 装下 45 维**（理由见 `mdp/observations.py`）。
 
-    policy: ObservationGroupCfg = ObservationGroupCfg(
-        terms={"policy": ObservationTermCfg(func=observations.policy_obs)},
-        concatenate_terms=True,
-        enable_corruption=False,   # 不做观测噪声：MuJoCo 侧没有，加了就不是同一个任务了
-    )
+    Isaac Lab 的观测组是"**子类属性即 term**"：`ObservationManager` 遍历
+    `group_cfg.__dict__` 收 term，再按名字跳过 `concatenate_terms`/`enable_corruption`
+    这些组自己的字段。**没有 `terms=` 这个构造参数**——写错的话会在**类体执行**时
+    （也就是 import 本模块的瞬间）就 `TypeError`，而不是等你建环境才报。
+    """
+
+    policy: ObservationTermCfg = ObservationTermCfg(func=observations.policy_obs)
+
+    def __post_init__(self):
+        self.concatenate_terms = True
+        # 不做观测噪声：MuJoCo 侧没有，加了就不是同一个任务了
+        self.enable_corruption = False
+
+
+@configclass
+class CourseObservationsCfg:
+    """只有 `policy` 一组（`env_cfg` 里挂给 `ManagerBasedRLEnvCfg.observations`）。"""
+
+    policy: CoursePolicyObsCfg = CoursePolicyObsCfg()
 
 
 @configclass
@@ -273,8 +330,9 @@ class CourseEnvCfg(ManagerBasedRLEnvCfg):
     # -------------------------------------------------------------- 工具
 
     def _build_terrain(self) -> None:
+        """建 `scene.terrain`。**挂 scene，不是挂 self**（理由见 `CourseSceneCfg.terrain`）。"""
         rows, cols = _patch_grid(self.scene.num_envs)
-        self.terrain = TerrainImporterCfg(
+        self.scene.terrain = TerrainImporterCfg(
             prim_path=TERRAIN_PRIM,
             terrain_type="generator",
             terrain_generator=TerrainGeneratorCfg(

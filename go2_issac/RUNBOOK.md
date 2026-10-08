@@ -77,10 +77,15 @@ docker run --name isaac-lab --gpus all -it --rm \
 |---|---|---|
 | MJCF 转换 CLI | `scripts/tools/convert_mjcf.py --fix-base --import-sites` | 同名脚本，参数换成 `--merge-mesh --collision-from-visuals --collision-type` |
 | 转换 API | `MjcfConverter` / `MjcfConverterCfg`（底层 `MJCFImporter`） | 同左，底层换成 `mujoco-usd-converter` 的 `MJCFImporter(config).import_mjcf()` |
-| 已移除的字段 | `fix_base` / `import_sites` | `self_collision` → `allow_self_collision` |
+| `fix_base` | **必填**（`= MISSING`，不传就 `TypeError`） | 已删除 |
+| `make_instanceable` / `import_sites` | 有，且**仍在生效**（不是"被忽略"） | `self_collision` → `allow_self_collision` |
 
-`convert_assets.py` **只传四个两代都有的字段**（`asset_path` / `usd_dir` /
-`usd_file_name` / `force_usd_conversion`），就是为了躲开这张表。
+`convert_assets.py` 传四个两代都有的字段（`asset_path` / `usd_dir` / `usd_file_name` /
+`force_usd_conversion`），`fix_base` 单独按这张表**探测着传**（存在才传，恒为 `False`）。
+
+> **2.3 上漏传 `fix_base` 的现场**：`cfg.validate()` 抛 `TypeError: Missing values detected
+> in object MjcfConverterCfg for the following fields: - fix_base`。这个 traceback 会被
+> `finally: app.close()` 吞掉——终端上只看到"打印完真值 JSON 就退出，退出码 0"。
 
 ### 把整个仓库搬过去
 
@@ -109,7 +114,8 @@ python3 go2_issac/convert_assets.py --scene    # 可选：把 scene.xml 也转�
    kp/kd 由 `env_cfg.py` 的 `ImplicitActuatorCfg` 在实例化时写回：
    `stiffness=60`、`damping=3.6`。**是 3.6 不是 3.5**——MuJoCo 的 12 个铰链自己带
    `damping=0.1`，Isaac 的隐式执行器只有 `damping` 一个旋钮，两个要加起来。
-2. **不要传 `fix_base`。** `go2.xml` 有 freejoint，保持浮动基座。
+2. **`fix_base` 要传，但值只能是 `False`。** `go2.xml` 有 freejoint，要浮动基座。
+   2.3 的 `MjcfConverterCfg` 把它设成 `MISSING`，漏传直接 `TypeError`（见上表）。
 3. **视觉网格不能变成碰撞体。** `go2.xml` 里 33 个 mesh 是 `contype=0 conaffinity=0`
    的纯视觉几何；万一 importer 给它们加了 CollisionAPI，狗会被自己的网格卡住。
    脚本里的 `strip_visual_collision()` 会去掉，`smoke.py --check-asset` 会验个数。
@@ -217,11 +223,14 @@ python3 go2_issac/play.py --resume <目录> --episodes 10 --headless
 |---|---|
 | 狗一落地就抖/塌 | `damping` 写成了 3.5（应该是 **3.6**）；或 `--check-asset` 报 kp 不对 |
 | 狗被自己卡住、原地抽搐 | 视觉网格被当成了碰撞体（`--check-asset` 会报碰撞几何个数） |
+| 静置时**机身飘在 1 m 上下**、还一路打滑，接触力冲到几倍体重 | `configuration/*.usd` 里碰撞球的 `radius` 属性**类型写错了**——`UsdGeomSphere.radius` 要 `double`，写成 `float` 时 USD 读得回来、PhysX 却整条忽略、退回默认半径 **1.0 m**。重跑 `convert_assets.py`（它现在会自己查类型） |
+| `--check-asset` 报总质量多 4 kg / 脚底球跑到 `*_calf` 下了 | `convert_assets.py` 第 6 步（脚底球归位 + 写 `*_foot` 质量）没跑到，PhysX 给 4 个零质量 body 各补了 1.0 kg |
 | 站在平地也判定"摔倒" | 地形高度查询对不上（`--check-terrain`），导致离地高度算成负的 |
 | 训不动、回报不涨 | 先看 `--check-order`：关节顺序错了不会报错，只会学不出来 |
 | 环境一多就随机崩/丢接触 | `env_cfg.py` 里 PhysX 那几个 capacity 给够 |
 | 曲线和 MuJoCo 侧差很多 | **正常**，见 §0。比趋势，别比数值 |
 | 换了 Isaac Lab 版本后 USD 加载失败 | 版本差异表，重转 USD；manifest 里有原来那套版本号 |
+| 脚本**安静退出、退出码 0、一行报错都没有** | Kit 的 `app.close()` 把 traceback 吞了。`convert_assets.py` 已加保护；别的脚本请自己 `traceback.print_exc()` |
 
 ## 7. 这次**没做**的事
 

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import torch
 
+from isaaclab.utils import configclass
+
 try:  # Isaac Lab 2.x
     from isaaclab.envs.mdp import JointPositionAction, JointPositionActionCfg
 except ImportError:  # Isaac Lab 1.x
@@ -28,7 +30,12 @@ class ClippedJointPositionAction(JointPositionAction):
         super().process_actions(torch.clamp(actions, -1.0, 1.0))
 
 
+@configclass
 class ClippedJointPositionActionCfg(JointPositionActionCfg):
-    """`env_cfg.py` 里挂它。其余字段（`scale` / `use_default_offset` / `joint_names`）照常。"""
+    """`env_cfg.py` 里挂它。其余字段（`scale` / `use_default_offset` / `joint_names`）照常。
+
+    `@configclass` 照例不能少（理由见 `mdp/terrain.py:CourseTerrainCfg`）。本类只是覆盖
+    基类已有字段，现在加不加都能跑；加上是为了以后往这里加字段时不必再踩一次坑。
+    """
 
     class_type: type = ClippedJointPositionAction

@@ -22,7 +22,8 @@
 | `log_std_init` 0.0 | `init_noise_std` 1.0 | `log_std_init=0` ⇔ `σ=1` ⇔ `init_noise_std=1.0` |
 | `total_steps` | `max_iterations` | `steps / (num_envs × num_steps_per_env)`，CLI 的 `--steps` 换算 |
 | `clip_range_vf=None` | `use_clipped_value_loss=False` | 两边都是"不裁 value" |
-| —— | `empirical_normalization=False` | MuJoCo 侧没有归一化；开了之后导出的策略还会带上归一化的统计量 |
+| —— | `policy.actor/critic_obs_normalization=False` | MuJoCo 侧没有归一化；开了之后导出的策略还会带上归一化的统计量 |
+| —— | `obs_groups={"policy": ["policy"], "critic": ["policy"]}` | 不是超参，是**接线**：不给会 KeyError（见类里那段注释） |
 """
 from __future__ import annotations
 
@@ -50,9 +51,13 @@ class Go2IsaacPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env: int = _SRC.n_steps
     # 迭代上限由 CLI 的 `--steps` 换算，这里给个够大的默认值
     max_iterations: int = 1000
-    # rsl_rl 默认会开一个经验归一化；MuJoCo 侧没有这个，开了之后策略的输入分布和
-    # play.py 回放时不一致（同一份权重换个环境就崩），所以关掉
-    empirical_normalization: bool = False
+    # **`obs_groups` 不是可选的**：rsl_rl 的 `ActorCritic.__init__` 头两件事之一就是
+    # `obs_groups["policy"]` 取维度，取不到直接 KeyError。而 `@configclass` 的 `MISSING`
+    # 经 `to_dict()` 会变成**空字典**——`class_to_dict` 认 `MISSING.__dict__`（= `{}`）
+    # 当普通对象递归下去——所以不写这一行拿到的是 `{}`，不是"某个合理的默认值"。
+    # 我们的观测只有 `policy` 一组（45/46 维全在一个 term 里），critic 用同一份
+    # （和 MuJoCo 侧一样：那边也是单输入网络）。写法与 Isaac Lab 官方示例一致。
+    obs_groups: dict[str, list[str]] = {"policy": ["policy"], "critic": ["policy"]}
     # 存档策略组件：只存模型 + 观测归一化 + 状态字典，不存 optimizer（省一半体积）
     save_interval: int = 100
     experiment_name: str = "go2_isaac"
@@ -61,6 +66,12 @@ class Go2IsaacPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     log_interval: int = 1
 
     policy: RslRlPpoActorCriticCfg = RslRlPpoActorCriticCfg(
+        # 观测归一化关掉，两边都不开（理由见文件头那张表）。
+        # **别写 `empirical_normalization`**：2.3 起它已废弃，rsl_rl 只在它"非 None"时才把值
+        # 转给这两个新字段，而 `MISSING -> {}`（见上面 `obs_groups` 的注释）并不是 None，
+        # 所以旧字段和新字段会两头落空——归一化确实没开，但纯属巧合，不是这行代码干的。
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
         init_noise_std=math.exp(_SRC.log_std_init),   # log_std_init=0 -> σ=1.0
         actor_hidden_dims=list(_SRC.net_arch),
         critic_hidden_dims=list(_SRC.net_arch),

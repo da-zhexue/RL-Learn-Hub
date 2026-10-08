@@ -10,13 +10,35 @@
 **函数返回的是"没乘权重的原始值"**（可能为负，比如 `base_height` 返回的是偏差量），
 乘权重是 Isaac 各版本都做的、也是 `compute_reward` 做的。
 
+**每个函数都套了 `@_per_step`**：Isaac 的 `RewardManager.compute` 对每一项做
+`value * weight * dt`（`reward_manager.py:149`），也就是它把奖励项当成"每秒率"；
+而 MuJoCo 侧（`go2_common/reward.py:compute_reward`）和 `core.compute_reward` 都是
+**不乘 dt 的每步值**。不补这一刀，回报整体小 50 倍（dt=0.02）：训练照样能跑、曲线形状
+也一样，但和 MuJoCo 的 TensorBoard 对不上、值函数的尺度白变一次。乘 `1/dt` 抵掉之后，
+两边的**权重也保持同名同值**（`Episode_Reward/<项名>` 的曲线逐点相等）。
+
 `core.TERMS` 是项名和顺序的唯一真源，模块末尾会断言这 14 个函数和它对得上——
 漏一项、名字写错，导入时就炸，而不是等到训练时发现奖励少了一块。
 """
 from __future__ import annotations
 
+import functools
+
 from go2_issac import core
 from go2_issac.mdp import state
+
+
+def _per_step(fn):
+    """把 `core.term_*` 的"每步值"换成 Isaac 口径的"每秒率"（理由见模块 docstring）。
+
+    `env.step_dt` 就是 `RewardManager.compute(dt=...)` 收到的那个 dt，两边用的是同一个数。
+    """
+
+    @functools.wraps(fn)
+    def wrapped(env):
+        return fn(env) / env.step_dt
+
+    return wrapped
 
 
 def _weight(env, name: str) -> float:
@@ -33,36 +55,42 @@ def _r(env):
 # ------------------------------------------------------------------ 前进 / 高度
 
 
+@_per_step
 def reward_progress(env):
     """前进：x 势能的增量 × 走廊权重（唯一的大额收入来源）。"""
     cfg, st = _r(env)
     return core.term_progress(st, cfg)
 
 
+@_per_step
 def reward_track_lin_vel(env):
     """速度跟踪（高斯），站着不动精确得 0。"""
     cfg, st = _r(env)
     return core.term_track_lin_vel(st, cfg)
 
 
+@_per_step
 def reward_climb(env):
     """爬升：地形势能增量（用地形高度，不用机身高度）。"""
     cfg, st = _r(env)
     return core.term_climb(st, cfg)
 
 
+@_per_step
 def reward_level_bonus(env):
     """每登上一级新台阶的一次性奖励。"""
     cfg, st = _r(env)
     return core.term_level_bonus(st, cfg)
 
 
+@_per_step
 def reward_base_height(env):
     """离当地地形的高度偏差（惩罚项，带死区）。"""
     cfg, st = _r(env)
     return core.term_base_height(st, cfg)
 
 
+@_per_step
 def reward_lateral(env):
     """保持在 y=0 走廊里（惩罚项）。"""
     cfg, st = _r(env)
@@ -72,16 +100,19 @@ def reward_lateral(env):
 # ------------------------------------------------------------------ 姿态
 
 
+@_per_step
 def reward_orientation(env):
     cfg, st = _r(env)
     return core.term_orientation(st, cfg)
 
 
+@_per_step
 def reward_yaw(env):
     cfg, st = _r(env)
     return core.term_yaw(st, cfg)
 
 
+@_per_step
 def reward_yaw_rate(env):
     cfg, st = _r(env)
     return core.term_yaw_rate(st, cfg)
@@ -90,6 +121,7 @@ def reward_yaw_rate(env):
 # ------------------------------------------------------------------ 平滑 / 能耗
 
 
+@_per_step
 def reward_action_rate(env):
     """相邻两步动作差的平方和。
 
@@ -100,11 +132,13 @@ def reward_action_rate(env):
     return core.term_action_rate(st, cfg)
 
 
+@_per_step
 def reward_torques(env):
     cfg, st = _r(env)
     return core.term_torques(st, cfg)
 
 
+@_per_step
 def reward_collision(env):
     """非脚部件撞地形，按接触力缩放（减掉 25 N 的底噪）。**不终止**。"""
     cfg, st = _r(env)
@@ -121,12 +155,14 @@ def _terminated(env):
     return st, ctx, core.terminations(st, ctx.cfg, ctx.goal_z)
 
 
+@_per_step
 def reward_success(env):
     """到达顶平台（站上 0.92 m 那块，见 `EnvCfg.goal_*`）。"""
     st, ctx, term = _terminated(env)
     return core.term_success(st, ctx.reward_cfg, term["any"], term["success"])
 
 
+@_per_step
 def reward_fall(env):
     """摔倒/出界终止（成功不算）。"""
     st, ctx, term = _terminated(env)

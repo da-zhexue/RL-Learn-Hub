@@ -18,6 +18,8 @@ from go2_common.config import EnvCfg
 from go2_issac import core
 from go2_issac.mdp import state
 
+from isaaclab.utils import configclass
+
 try:  # Isaac Lab 2.x
     from isaaclab.envs.mdp import CommandTerm, CommandTermCfg
 except ImportError:  # Isaac Lab 1.x
@@ -36,6 +38,17 @@ class CourseVelocityCommand(CommandTerm):
         # (N, 1)：CommandManager 期望 command 的第一维是环境数；
         # 通道数 1 表示"只有前进速度"，不要照抄 Isaac 惯用的 3（vx, vy, wz）。
         self._command = torch.zeros(env.num_envs, 1, dtype=torch.float32, device=env.device)
+
+        # 指标累加器：**必须是 (环境数,) 的可写张量**。
+        # `CommandTerm.reset(env_ids)` 对每个指标做 `torch.mean(metric_value[env_ids])`
+        # 然后 `metric_value[env_ids] = 0.0`（`command_manager.py:136-145`）：
+        # 0 维标量在这里直接 `IndexError: too many indices for tensor of dimension 0`（实测）。
+        # 键必须在 `term.reset()` 被调用前就位——`ManagerBase._prepare_terms` 里建完 term
+        # 立刻会 `reset()` 一次（为的是先把指令采出来）。累加/回合清零由管理器管。
+        self.metrics["success"] = torch.zeros(env.num_envs, device=env.device)
+        self.metrics["fallen"] = torch.zeros(env.num_envs, device=env.device)
+        self.metrics["level"] = torch.zeros(env.num_envs, device=env.device)
+        self.metrics["vx_ratio"] = torch.zeros(env.num_envs, device=env.device)
 
     @property
     def command(self) -> torch.Tensor:
@@ -63,31 +76,38 @@ class CourseVelocityCommand(CommandTerm):
 
     # -------------------------------------------------------------- 指标
     #
-    # **这只是个"瞬时视角"的辅助通道**：`CommandManager` 会把这些按
-    # `Metrics/command/<term>/<key>` 写进 `extras["log"]`，rsl_rl 记到 TensorBoard。
-    # 权威的评估口径是 `mdp/metrics.py:EpisodeTracker`（按回合累积，逐项对齐
-    # `EvalMetricsCallback`）——这里给的是"这一步所有环境上的均值"，两条曲线
-    # 数值不会完全一样，看趋势用哪个都行。
+    # **这只是个"辅助通道"**：`CommandTerm.reset` 在回合结束把这里的累加值取均值，
+    # `CommandManager` 再按 `Metrics/command/<term>/<key>` 写进 `extras["log"]`，
+    # rsl_rl 记到 TensorBoard。权威的评估口径是 `mdp/metrics.py:EpisodeTracker`
+    # （按回合累积，逐项对齐 `EvalMetricsCallback`）——两条曲线数值不会完全一样，
+    # 看趋势用哪个都行。
     #
     # `*args` 是刻意的：`_update_metrics()` 的签名在 Isaac Lab 各版本之间变过
     # （有的带 `update_interval` 参数），多收参数比赌签名安全。
 
     def _update_metrics(self, *args, **kwargs) -> None:
+        # 现在就一定能建出 ctx（`state._ctx` 会就地建，见那边的 docstring）。
+        # 万一 scene 都还没有，那是 env 构造更早期的事，这里直接跳过更稳。
         try:
             ctx = state._ctx(self._env)
         except RuntimeError:
-            # `setup()` 还没跑（CommandManager 先于 startup 事件构造）
             return
         st = state.get_state(self._env)
         term = core.terminations(st, ctx.cfg, ctx.goal_z)
 
-        # 本步各量在所有环境上的均值；`CommandManager` 会按平均回合长度归一化。
-        self.metrics["success"] = term["success"].float().mean()
-        self.metrics["fallen"] = term["fallen"].float().mean()
-        self.metrics["level"] = st.terrain_level.float().mean()
+        # **按步累加（`+=`），不是赋值**：`CommandTerm.reset` 在回合结束时对累加值取均值
+        # 再清零，所以这里每次加的是"这一步的值 ÷ 本回合步数"，累加出来才是回合平均。
+        # 赋均值的话管理器读到的是"最后一步的均值"，数值随回合长度漂。
+        # 官方 `UniformVelocityCommand` 也是这个写法（它除的是 `resampling_time_range[1]/step_dt`，
+        # 因为它的指令按那个周期重采；我们的指令整回合不变，除回合步数）。
+        w = 1.0 / max(1.0, float(self._env.max_episode_length))
+        self.metrics["success"] += term["success"].float() * w
+        self.metrics["fallen"] += term["fallen"].float() * w
+        self.metrics["level"] += st.terrain_level.float() * w
         # 速度跟踪比：|vx| / cmd_vx，1.0 表示跟得上，<1 表示磨蹭
-        self.metrics["vx_ratio"] = (
-            st.base_lin_vel[:, 0].abs() / st.cmd_vx.clamp(min=1e-3)).mean()
+        # （显式 `.float()`：`st` 是 float64，原地 `+=` 进 float32 累加器得先降下来）
+        self.metrics["vx_ratio"] += (
+            st.base_lin_vel[:, 0].abs() / st.cmd_vx.clamp(min=1e-3)).float() * w
 
     # -------------------------------------------------------------- 可视化占位
 
@@ -98,8 +118,13 @@ class CourseVelocityCommand(CommandTerm):
         """同 `_set_debug_vis_impl`：这里没有 marker 要更新。"""
 
 
+@configclass
 class CourseVelocityCommandCfg(CommandTermCfg):
-    """`env_cfg.py` 里挂它。`class_type` + `resampling_time_range` 是 Isaac 的约定写法。"""
+    """`env_cfg.py` 里挂它。`class_type` + `resampling_time_range` 是 Isaac 的约定写法。
+
+    `@configclass` 照例不能少（理由见 `mdp/terrain.py:CourseTerrainCfg`）。本类只是覆盖
+    基类已有字段，现在加不加都能跑；加上是为了以后往这里加字段时不必再踩一次坑。
+    """
 
     class_type: type = CourseVelocityCommand
 

@@ -20,6 +20,9 @@
 之间变过），只实现 `step()`，其余属性用 `__getattr__` 透传。rsl_rl 的 runner 需要的
 `num_envs` / `num_actions` / `max_episode_length` / `device` / `reset()` 等等都会落到
 里面的包装器上，路径差异就此躲开。
+
+**读写都要透传**：只有 `__getattr__` 是不够的，`__setattr__` 少了会让
+`OnPolicyRunner.learn(init_at_random_ep_len=True)` 静默失效（理由见那个方法）。
 """
 from __future__ import annotations
 
@@ -35,6 +38,10 @@ WARMUP_STEPS = 100
 #: 必须和 MuJoCo 侧一一对应的记录名（`eval/<名字>` 两边的 TensorBoard 上都能直接对）
 _FIELDS = ("mean_reward", "success_rate", "mean_level", "max_level",
            "mean_max_x", "mean_vx", "vx_ratio")
+
+#: `EpisodeTracker` 自己的、不以 `_` 开头的字段：赋值留在本地，别转发给被包的 env
+#: （理由见 `EpisodeTracker.__setattr__`）
+_OWN = frozenset({"vec_env", "num_levels", "verbose", "window", "done", "last"})
 
 
 class EpisodeTracker:
@@ -64,6 +71,26 @@ class EpisodeTracker:
         if name.startswith("__") and name.endswith("__"):
             raise AttributeError(name)
         return getattr(self.vec_env, name)
+
+    def __setattr__(self, name, value):
+        """写也透传下去——**这一条少了就是静默失效**。
+
+        只有 `__getattr__` 的话，`runner.learn(init_at_random_ep_len=True)` 里那句
+        `self.env.episode_length_buf = torch.randint_like(...)` 是**赋值**，会落在这个
+        包装器自己身上（Python 的默认行为），底下 `ManagerBasedRLEnv` 的 buffer 一动
+        没动：不报错、不警告，"说好的随机初始相位"根本没发生。
+        透传下去正好命中 `RslRlVecEnvWrapper.episode_length_buf` 那个带 setter 的
+        property，一路写到真环境上。
+
+        自己的字段（`_` 开头的一律算，加上 `_OWN` 里那几个不带的）留在本地，
+        其余全转发。`__init__` 第一句 `self.vec_env = ...` 时实例字典还是空的，
+        走 else 分支，不会递归。
+        """
+        if (name.startswith("_") or name in _OWN
+                or "vec_env" not in self.__dict__):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self.vec_env, name, value)
 
     # ---------------------------------------------------------- 每回合簿记
 

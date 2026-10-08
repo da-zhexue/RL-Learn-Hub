@@ -166,10 +166,15 @@ class State:
 
     字段顺序和含义对着 `env.py` 的 `RewardInput` 与 `_obs()`：
     线速度是**世界系**、角速度是**机体系**（自由关节的 qvel 就是这个约定）。
+    位置是**课程系**（见下面 `base_pos` 的注释）——速度不用换算：两个系之间只差一个常量平移。
     """
 
     # --- 当前状态，全部 (N, ...)，float64
-    base_pos: torch.Tensor      # (N,3) 世界系位置
+    # base_pos 是**课程坐标系**下的位置（z 是世界高度，地形 patch 就在世界 z=0 上）。
+    # MuJoCo 那边世界系 == 课程系，所以本来就是它；Isaac 的世界系差一个 per-env 平移，
+    # 由 `mdp/state.get_state` 换算好再填进来——下面所有 x/y 判据（is_out_of_course /
+    # is_success / term_progress / term_lateral）都以此为前提，别往里塞 `root_pos_w`。
+    base_pos: torch.Tensor      # (N,3) 课程坐标系位置
     base_quat: torch.Tensor     # (N,4) wxyz
     base_lin_vel: torch.Tensor  # (N,3) 世界系线速度
     base_ang_vel: torch.Tensor  # (N,3) 机体系角速度（陀螺）
