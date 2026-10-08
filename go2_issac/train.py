@@ -1,9 +1,9 @@
 """用 rsl_rl 的 PPO 在 Isaac Sim 里训练 Go2 过地形。**只能在有 NVIDIA 显卡的机器上跑**
 （见 `RUNBOOK.md`；本机连 Isaac Sim 都装不下）。
 
-    python3 go2_issac/train.py --terrain flat  --steps 200_000 --headless
-    python3 go2_issac/train.py --terrain steps --steps 100_000 --num-envs 512 --headless
-    python3 go2_issac/train.py --terrain full  --steps 150_000 --num-envs 2048 --headless
+    python3 go2_issac/train.py --terrain flat  --steps 200_000 --visualizer none
+    python3 go2_issac/train.py --terrain steps --steps 100_000 --num-envs 512 --visualizer none
+    python3 go2_issac/train.py --terrain full  --steps 150_000 --num-envs 2048 --visualizer none
 
 课程阶段和 MuJoCo 侧（`go2_ppo/train.py`）完全一样，先易后难：
 flat（跑稳）→ steps（过 0.08 m 的槛）→ full（爬台阶）。
@@ -29,6 +29,7 @@ import json
 import pathlib
 import sys
 import time
+from importlib.metadata import version
 
 # 支持 `python3 go2_issac/train.py` 直接运行（光靠 `python3 -m` 不够，见 go2_ppo/train.py）
 HERE = pathlib.Path(__file__).resolve().parent
@@ -78,7 +79,8 @@ def parse_args(argv=None):
                    help="直接给迭代数（给了就忽略 --steps）")
     p.add_argument("--torch-threads", type=int, default=None, help="限制 CPU 线程数")
 
-    # --headless / --device / --enable_cameras / --cpu 等由 Kit 自己加
+    # --visualizer / --device / --kit_args 等由 Kit 自己加
+    # （3.0 起 `--headless` / `--enable_cameras` / `--cpu` 都删了，无头 = `--visualizer none`）
     from isaaclab.app import AppLauncher
     AppLauncher.add_app_launcher_args(p)
     args = p.parse_args(argv)
@@ -153,7 +155,7 @@ def main(argv=None) -> int:
 
     # 下面这些 import 都要求 Kit 已经起来，**不要**提到上面去
     import torch
-    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
+    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
     from rsl_rl.runners import OnPolicyRunner
 
     from go2_common.config import MODELS_DIR, RewardCfg, to_jsonable
@@ -184,6 +186,11 @@ def main(argv=None) -> int:
     iters = args.max_iterations or iterations_for(
         args.steps, args.num_envs, agent_cfg.num_steps_per_env)
     agent_cfg.max_iterations = iters
+
+    # rsl-rl 5.x 换了配置 schema（`policy=` 拆成 `actor`/`critic`，噪声挪进 `distribution_cfg`）。
+    # 官方入口在 `to_dict()` 之前调这个函数：它按**已装的** rsl-rl 版本把废弃字段从配置里删掉。
+    # 不调的话 `stochastic`/`init_noise_std` 会原样传给 `MLPModel`，直接 TypeError。
+    handle_deprecated_rsl_rl_cfg(agent_cfg, version("rsl-rl-lib"))
 
     # 续训路径已在 `parse_args` 里校验完（起 Kit 之前就报错，见 `_resolve_resume`）
     resume_path = args.resume_path

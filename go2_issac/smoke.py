@@ -499,7 +499,7 @@ def main() -> int:
     ap.add_argument("--terrain-scale", type=float, default=1.0)
     ap.add_argument("--num-envs", type=int, default=4, help="自检用不了多少环境")
 
-    # `--headless` / `--device` / `--enable_cameras` 由 Kit 自己加。
+    # `--visualizer` / `--device` 由 Kit 自己加（3.0 起 `--headless` / `--enable_cameras` 已删）。
     # **不要自己造一个 `argparse.Namespace(headless=...)` 交给 AppLauncher**——
     # 它内部还会读 device / enable_cameras / cpu / verbose 等一串字段，
     # 少一个就是 AttributeError，而且报错位置离真正的原因很远。

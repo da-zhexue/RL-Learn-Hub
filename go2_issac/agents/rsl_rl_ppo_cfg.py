@@ -18,11 +18,11 @@
 | `max_grad_norm` 0.5 | `max_grad_norm` | 同 |
 | `ent_coef` 0.005 | `entropy_coef` | 同 |
 | `target_kl` 0.02 早停 | `schedule="adaptive"` + `desired_kl=0.02` | **正好是同一个东西**，不是近似 |
-| `net_arch` (256,256) | `actor_hidden_dims` / `critic_hidden_dims` | 同 |
-| `log_std_init` 0.0 | `init_noise_std` 1.0 | `log_std_init=0` ⇔ `σ=1` ⇔ `init_noise_std=1.0` |
+| `net_arch` (256,256) | `actor.hidden_dims` / `critic.hidden_dims` | 同 |
+| `log_std_init` 0.0 | `actor.distribution_cfg.init_std` 1.0 | `log_std_init=0` ⇔ `σ=1` ⇔ `init_std=1.0` |
 | `total_steps` | `max_iterations` | `steps / (num_envs × num_steps_per_env)`，CLI 的 `--steps` 换算 |
 | `clip_range_vf=None` | `use_clipped_value_loss=False` | 两边都是"不裁 value" |
-| —— | `policy.actor/critic_obs_normalization=False` | MuJoCo 侧没有归一化；开了之后导出的策略还会带上归一化的统计量 |
+| —— | `actor/critic.obs_normalization=False` | MuJoCo 侧没有归一化；开了之后导出的策略还会带上归一化的统计量 |
 | —— | `obs_groups={"policy": ["policy"], "critic": ["policy"]}` | 不是超参，是**接线**：不给会 KeyError（见类里那段注释） |
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ import math
 from go2_ppo.config import TrainCfg
 
 from isaaclab.utils import configclass
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
 #: MuJoCo 侧的超参就是这个对象（不会有第二个默认值）
 _SRC = TrainCfg()
@@ -62,20 +62,26 @@ class Go2IsaacPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval: int = 100
     experiment_name: str = "go2_isaac"
     logger: str = "tensorboard"
-    # PPO 跑得快，默认 24 会刷屏
-    log_interval: int = 1
+    # （`log_interval` 在 rsl-rl 5.x 里没有了，2.3 时代用它压日志频率）
 
-    policy: RslRlPpoActorCriticCfg = RslRlPpoActorCriticCfg(
-        # 观测归一化关掉，两边都不开（理由见文件头那张表）。
-        # **别写 `empirical_normalization`**：2.3 起它已废弃，rsl_rl 只在它"非 None"时才把值
-        # 转给这两个新字段，而 `MISSING -> {}`（见上面 `obs_groups` 的注释）并不是 None，
-        # 所以旧字段和新字段会两头落空——归一化确实没开，但纯属巧合，不是这行代码干的。
-        actor_obs_normalization=False,
-        critic_obs_normalization=False,
-        init_noise_std=math.exp(_SRC.log_std_init),   # log_std_init=0 -> σ=1.0
-        actor_hidden_dims=list(_SRC.net_arch),
-        critic_hidden_dims=list(_SRC.net_arch),
+    # Isaac Lab 3.0 / rsl-rl 5.x 把单个 `policy=RslRlPpoActorCriticCfg(...)` 拆成了两个
+    # `RslRlMLPModelCfg`，噪声从 `init_noise_std` 挪进 `distribution_cfg`（旧字段
+    # `stochastic`/`init_noise_std` 还在，但只是废弃别名，新代码别用）。
+    actor: RslRlMLPModelCfg = RslRlMLPModelCfg(
+        hidden_dims=list(_SRC.net_arch),
         activation="elu",       # rsl_rl 的默认，也是 legged_gym 一直用的那档
+        # 观测归一化关掉，两边都不开（理由见文件头那张表）
+        obs_normalization=False,
+        # `log_std_init=0` ⇔ `σ=1`；默认档 `std_type="scalar"` = 老的 `noise_std_type="scalar"`
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(
+            init_std=math.exp(_SRC.log_std_init),
+        ),
+    )
+    critic: RslRlMLPModelCfg = RslRlMLPModelCfg(
+        hidden_dims=list(_SRC.net_arch),
+        activation="elu",
+        obs_normalization=False,
+        # `distribution_cfg` 留 None = 确定性输出，critic 只要 value
     )
     algorithm: RslRlPpoAlgorithmCfg = RslRlPpoAlgorithmCfg(
         learning_rate=_SRC.learning_rate,
