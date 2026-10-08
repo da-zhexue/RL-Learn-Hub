@@ -70,6 +70,9 @@ class Go2TerrainEnv(GymEnv):
 
         self.cmd_vx = self.cfg.cmd_vx[0]
         self.prev_action = np.zeros(n, dtype=np.float64)
+        # prev_x 必须也有初值：diag.hold_stance 会绕过 reset() 直接 step()，
+        # 少了它 progress 项在第一次 step 就 AttributeError。
+        self.prev_x = 0.0
         self.prev_terrain_h = 0.0
         self.prev_terrain_level = 0
         self.step_count = 0
@@ -110,6 +113,27 @@ class Go2TerrainEnv(GymEnv):
         self.is_penalty_geom = np.array(
             [self.model.geom_bodyid[g] != 0 and g not in foot_ids for g in range(ngeom)]
         )
+        # 顺序无所谓（support_height 取中位数），但固定下来便于调试
+        self.foot_geom_ids = np.array(sorted(foot_ids), dtype=int)
+
+    def _support_height(self) -> float:
+        """狗实际站立的地面高度（四只脚下方的中位数），见 `terrain.support_height`。
+
+        这是 `step()` 里唯一的"当地地形高度"来源：`climb` / `level_bonus` /
+        `base_height` / `is_fallen` 全都吃它。换成机身中心处的 `terrain.top()`
+        会让狗在没爬上去的时候就领到整级台阶的分（实测证据见 terrain.py 的注释）。
+        """
+        xy = self.data.geom_xpos[self.foot_geom_ids][:, :2]
+        return self.terrain.support_height(xy)
+
+    def support_level(self) -> int:
+        """当前站上第几级——按**支撑面**算，和 `step()` 里发 `level_bonus` 的那个数同源。
+
+        诊断/回放看"最高台阶"要用这个，别用 `terrain.level(x, y)`：后者是**机身中心**
+        的口径，机身探到台阶上方时它就已经算上去了，会比狗真正站上的级数高一级
+        （这正是旧版奖励虚高的那件事，见 `terrain.support_height`）。
+        """
+        return self.terrain.level_at_height(self._support_height())
 
     # -------------------------------------------------------------- 观测
 
@@ -128,8 +152,9 @@ class Go2TerrainEnv(GymEnv):
             ]
         )
         if self.cfg.privileged:
-            # 只有这一维在 DDS 的 LowState 里拿不到（要用 rt/sportmodestate），默认关
-            obs = np.append(obs, d.qpos[2] - self.terrain.top(d.qpos[0], d.qpos[1]))
+            # 只有这一维在 DDS 的 LowState 里拿不到（要用 rt/sportmodestate），默认关。
+            # 基准用支撑面（四只脚下方），和奖励/终止同一套口径
+            obs = np.append(obs, d.qpos[2] - self._support_height())
         return np.clip(obs, -OBS_CLIP, OBS_CLIP).astype(np.float32)
 
     # -------------------------------------------------------------- 接触
@@ -174,11 +199,13 @@ class Go2TerrainEnv(GymEnv):
 
         self.prev_action = np.zeros(self.model.nu, dtype=np.float64)
         self.prev_x = x
-        self.prev_terrain_h = self.terrain.top(x, y)
-        self.prev_terrain_level = self.terrain.level(x, y)
         self.step_count = 0
         # 前推一次，否则接触/传感器数据还是上一回合的
         mujoco.mj_forward(self.model, d)
+        # 支撑面必须在 mj_forward **之后**取：在那之前 geom_xpos 还停在上一回合的位置，
+        # 四只脚读到的是上一次落点（出生点离台阶近时差一整级台阶）。
+        self.prev_terrain_h = self._support_height()
+        self.prev_terrain_level = self.terrain.level_at_height(self.prev_terrain_h)
 
         info = {
             "x": x,
@@ -207,13 +234,14 @@ class Go2TerrainEnv(GymEnv):
         d = self.data
         base_pos = d.qpos[:3]
         rpy = quat_to_rpy(d.qpos[3:7])
-        terrain_h = self.terrain.top(base_pos[0], base_pos[1])
-        terrain_level = self.terrain.level(base_pos[0], base_pos[1])
+        # 支撑面高度 = 四只脚下方的中位数，**不是**机身中心处的 top()（见 _support_height）
+        terrain_h = self._support_height()
+        terrain_level = self.terrain.level_at_height(terrain_h)
 
         success = terrain.is_success(cfg, base_pos)
         terminated = bool(
             success
-            or terrain.is_fallen(cfg, self.terrain, base_pos)
+            or terrain.is_fallen(cfg, terrain_h, base_pos)
             or terrain.is_flipped(cfg, rpy)
             or terrain.is_out_of_course(cfg, base_pos)
         )
@@ -255,7 +283,7 @@ class Go2TerrainEnv(GymEnv):
             "terrain_h": terrain_h,
             "vx": float(r.base_v[0]),
             "cmd_vx": self.cmd_vx,
-            "level": self.terrain.level(base_pos[0], base_pos[1]),
+            "level": terrain_level,
             "success": success,
             "is_success": success,  # SB3 的 Monitor 会用它统计
             # reward 分项里的 "success"（权重 20.0）被上面这个布尔值覆盖了，改名另存一份

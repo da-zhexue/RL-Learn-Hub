@@ -136,15 +136,36 @@ class CourseTerrain:
         out = self.top(xs.unsqueeze(-1), ys.unsqueeze(-2)).amax(dim=(-2, -1))
         return float(out) if scalar else out
 
-    def level(self, x, y=0.0):
-        """站上第几级台阶（0 = 还在平地/槛上）。"""
-        x, y, scalar = self._as_tensors(x, y)
-        h = self.top(x, y)
+    def support_height(self, xy_feet):
+        """狗**实际站立的地面**高度 = 四只脚下方地形高度的中位数，(...,)。
+
+        `terrain.TerrainHeight.support_height` 的 torch 版：入参末两维是 (脚数, 2)。
+        取中位数而不是 min/max 的理由见那个函数的注释——简单说，机身中心处的 `top()`
+        会在狗**还没爬上去**的时候就把整级台阶的分发完。
+
+        **不能用 `torch.median`**：偶数个样本时它返回**中间偏下**那个，而 `np.median`
+        取中间两个的**平均**。四只脚横跨台阶时（两只在上、两只在下）两者正好差半级台阶
+        ——那恰恰是最常见的一帧，对拍会逐点红。这里按 numpy 的定义手写：
+        偶数取中间两个的平均，奇数就是中间那个。
+        """
+        xy = torch.as_tensor(xy_feet, dtype=self.dtype, device=self.boxes.device)
+        h = self.top(xy[..., 0], xy[..., 1])
+        s, _ = h.sort(dim=-1)
+        return 0.5 * (s[..., (h.shape[-1] - 1) // 2] + s[..., h.shape[-1] // 2])
+
+    def level_at_height(self, h):
+        """高度 h 处算站上第几级（0 = 还在平地/槛上）。"""
+        h = torch.as_tensor(h, dtype=self.dtype, device=self.boxes.device)
         if not self.stair_tops:
-            out = torch.zeros_like(h, dtype=torch.long)
-        else:
-            tops = torch.tensor(self.stair_tops, dtype=self.dtype, device=h.device)
-            out = (tops <= h.unsqueeze(-1) + 1e-6).sum(dim=-1)
+            return torch.zeros_like(h, dtype=torch.long)
+        tops = torch.tensor(self.stair_tops, dtype=self.dtype, device=h.device)
+        return (tops <= h.unsqueeze(-1) + 1e-6).sum(dim=-1)
+
+    def level(self, x, y=0.0):
+        """**机身中心**在 (x, y) 时算第几级。只用于诊断/回放显示；奖励与终止一律走
+        `support_height` + `level_at_height`（理由同 `support_height`）。"""
+        x, y, scalar = self._as_tensors(x, y)
+        out = self.level_at_height(self.top(x, y))
         return int(out) if scalar else out
 
 

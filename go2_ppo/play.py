@@ -89,9 +89,7 @@ def play_viewer(model, env_cfg, episodes, verbose=True):
             def on_step(e):
                 nonlocal deadline
                 stats["max_x"] = max(stats["max_x"], float(e.data.qpos[0]))
-                stats["max_level"] = max(
-                    stats["max_level"], e.terrain.level(e.data.qpos[0], e.data.qpos[1])
-                )
+                stats["max_level"] = max(stats["max_level"], e.support_level())
                 deadline += period
                 left = deadline - time.perf_counter()
                 if left > 0:

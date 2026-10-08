@@ -31,8 +31,10 @@ class RewardInput:
     base_w: np.ndarray  # 机体系角速度
     base_pos: np.ndarray  # 世界系位置 (x, y, z)
     prev_x: float  # 上一步的 x（progress 要差分）
-    terrain_h: float  # 当前脚下的地形高度
-    prev_terrain_h: float  # 上一步的地形高度
+    # "当地地形高度"一律指**支撑面**：四只脚下方地形高度的中位数
+    # （env._support_height -> terrain.TerrainHeight.support_height），不是机身中心处的 top()。
+    terrain_h: float
+    prev_terrain_h: float  # 上一步的支撑面高度
     terrain_level: int  # 当前站上第几级台阶（0=还在平地/槛上）
     prev_terrain_level: int  # 上一步的第几级
     cmd_vx: float  # 本回合的前进速度指令
@@ -79,10 +81,13 @@ def _track_lin_vel(r: RewardInput, cfg: RewardCfg) -> float:
 
 
 def _climb(r: RewardInput, cfg: RewardCfg) -> float:
-    """爬升奖励：地形势能的增量 γ·h(x') − h(x)。
+    """爬升奖励：地形势能的增量 γ·h(x') − h(x)，h 是**支撑面高度**（四只脚下方的中位数）。
 
     用地形高度增量而不是机身高度增量——后者抬屁股/弹跳就能刷分。权重必须给足
     （推理见 AGENT.md §5-B4）。`climb_gamma` 为 1.0，即不乘 γ（见 AGENT.md §5-B2）。
+
+    h 的定义必须是支撑面：曾经用机身中心处的 `terrain.top()`，于是**机身中心**越过台阶
+    立面就把整级台阶发完（哪怕脚还全在平地上），直接教出"伸头蹭一下台阶就倒地"的策略。
     """
     return float(cfg.climb_gamma * r.terrain_h - r.prev_terrain_h)
 

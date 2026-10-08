@@ -108,10 +108,37 @@ class TerrainHeight:
             for yi in ys
         )
 
-    def level(self, x: float, y: float = 0.0) -> int:
-        """已经站上第几级台阶，0 表示还在平地/槛上，满级 = len(stair_tops)。"""
-        h = self.top(x, y)
+    def support_height(self, foot_xy) -> float:
+        """狗**实际站立的地面**高度：四只脚下方地形高度的中位数。
+
+        **绝不能用机身中心 (x, y) 处的 `top()` 代替。** 地形在台阶立面处是不连续的，
+        机身中心一旦越过立面，取到的就是"狗还没站上去的那一级"——实测（s0.86 模型）：
+        机身中心越过 x=2.1、四只脚里只有一只搭在台阶上时，`climb` 就把整级台阶
+        （0.1462 m × 100 = +14.6）连 `level_bonus +5` 一起发完了，而狗还在平地上、
+        roll 已经 -0.66 在侧翻。这个"白拿"直接教出了"伸头蹭一下台阶就倒地"的策略，
+        是"六段课程、205 万步、最远 x 一直卡在 2.1"的头号原因（见 AGENT.md §5-C6）。
+
+        中位数（而不是 min/max）：台阶的踏面深度（0.19~0.28 m）比狗的脚印（0.4 m）短，
+        狗站在楼梯上永远是两条腿在一级、两条腿在相邻一级，中位数正好落在**它踩着的那一级**上：
+        平地 = 0，两前腿上一级 = 半级，前后跨两级 = 较低那级，登上顶平台 = 顶面高度。
+        取 min 会要求四条腿全部上去（踏面根本放不下），信号太稀疏；
+        取 max 则一只脚悬在台阶上方就能拿满分，和现在一样能刷。
+
+        入参 foot_xy 是四只脚的 (x, y)，顺序无所谓。
+
+        torch 那边（`core.CourseTerrain.support_height`）必须逐位复现这里的中位数语义：
+        偶数个样本取中间两个的**平均**，所以那边不能用 `torch.median`（它取中间偏下那个）。
+        """
+        return float(np.median([self.top(float(x), float(y)) for x, y in foot_xy]))
+
+    def level_at_height(self, h: float) -> int:
+        """高度 h 处算站上第几级，0 表示还在平地/槛上，满级 = len(stair_tops)。"""
         return sum(1 for t in self.stair_tops if t <= h + 1e-6)
+
+    def level(self, x: float, y: float = 0.0) -> int:
+        """**机身中心**在 (x, y) 时算第几级。只用于诊断/回放显示，奖励与终止请用
+        `support_height` + `level_at_height`（理由见 `support_height`）。"""
+        return self.level_at_height(self.top(x, y))
 
 
 # ------------------------------------------------------------------ 判据
@@ -123,14 +150,18 @@ def is_success(cfg, base_pos) -> bool:
     return x >= cfg.goal_x and z >= cfg.goal_z and abs(y) <= cfg.goal_y
 
 
-def is_fallen(cfg, terrain: TerrainHeight, base_pos) -> bool:
-    """机身贴着当地地形了（摔倒）。
+def is_fallen(cfg, support_h: float, base_pos) -> bool:
+    """机身贴着**脚下的地面**了（摔倒）。
 
     用"相对当地地形"而不是绝对高度：在顶平台上 base 有 1.19 m，在平地上只有 0.27 m，
     绝对阈值在台阶上永远触发不了。
+
+    support_h 必须传 `TerrainHeight.support_height` 的结果（四只脚下方的中位数），
+    不是机身中心处的 `top()`：机身中心一越过台阶立面，站立余量就被凭空扣掉整级台阶
+    （s1.0 时正好扣光 0.17 m，fall_clearance 是 0.10，本来站得好好的狗会被判"贴地"）。
     """
-    x, y, z = float(base_pos[0]), float(base_pos[1]), float(base_pos[2])
-    return (z - terrain.top(x, y)) < cfg.fall_clearance
+    z = float(base_pos[2])
+    return (z - support_h) < cfg.fall_clearance
 
 
 def is_out_of_course(cfg, base_pos) -> bool:

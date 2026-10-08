@@ -58,9 +58,9 @@ def run_once(env, act, seed=0):
     st = {"x": -9.0, "lv": 0}
 
     def on_step(e):
-        x, y = float(e.data.qpos[0]), float(e.data.qpos[1])
-        st["x"] = max(st["x"], x)
-        st["lv"] = max(st["lv"], e.terrain.level(x, y))
+        st["x"] = max(st["x"], float(e.data.qpos[0]))
+        # 台阶数按**支撑面**算（四只脚），不是机身中心：后者在狗还没站上去时就已经算上了
+        st["lv"] = max(st["lv"], e.support_level())
 
     total, info = run_episode(env, act, seed=seed, on_step=on_step)
     return st["x"], st["lv"], total, info
@@ -347,7 +347,7 @@ def cmd_why(argv):
                 st["x0"], st["z0"] = float(p[0]), float(p[2])
                 st["thr0"] = float(e.terrain.top(float(p[0]), float(p[1])))
             st["x"] = max(st["x"], float(p[0]))
-            st["lv"] = max(st["lv"], e.terrain.level(float(p[0]), float(p[1])))
+            st["lv"] = max(st["lv"], e.support_level())
 
         total, info = run_episode(env, policy_act(model), seed=700 + ep, on_step=on_step)
         p = np.array(env.data.qpos[0:3], dtype=float)
@@ -383,17 +383,23 @@ def cmd_reward(argv):
     sums = {n: 0.0 for n in names}
     steps = 0
     for ep in range(n_ep):
-        _, _, _, info = run_once(env, policy_act(model), seed=500 + ep)
-        n = max(env.step_count, 1)
-        steps += n
-        for k in names:
-            sums[k] += float(info[k])
+        # **不能走 run_once**：它只回传最后一步的 info，累加出来的是"每个回合的收尾那一拍"
+        # ——摔死/超时那一步的分项，和整回合的账毫无关系（这是这个子命令以前印出
+        # 一坨没意义的数的原因）。分项奖励要逐步累加，所以这里自己走循环。
+        obs, _ = env.reset(seed=500 + ep)
+        while True:
+            obs, _, term, trunc, info = env.step(model.predict(obs, deterministic=True)[0])
+            steps += 1
+            for k in names:
+                sums[k] += float(info[k])
+            if term or trunc:
+                break
     print(f"{path}  地形={terr} scale={scale}  共 {n_ep} 回合 / {steps} 步  "
           f"(平均 {steps / n_ep:.0f} 步/回合)\n")
     for k, v in sorted(sums.items(), key=lambda kv: kv[1]):
         print(f"  {k:<16} {v:>10.1f}   ({v / steps:+.4f}/步)")
-    print("\n注意看回合有多短：如果步数远小于 1000，说明是先摔了，")
-    print("各项分自然都接近 0 —— 那不是'奖励设计错了'，是还没走起来就结束了。")
+    print("\n上表是**逐步累加**的整回合账。注意看回合有多短：如果步数远小于 1000，")
+    print("说明是先摔了，各项分自然都接近 0 —— 那不是'奖励设计错了'，是还没走起来就结束了。")
     env.close()
     return 0
 

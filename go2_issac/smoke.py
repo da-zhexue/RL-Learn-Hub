@@ -394,6 +394,25 @@ def check_sanity(env, args) -> None:
         n_timeout += int(truncated.sum())
     ok(n_timeout > 0, "零动作跑满 20 s 会因超时重置", f"超时 {n_timeout} 次")
 
+    # 6) 支撑面高度取自**四只脚**（AGENT.md §5-C6）。这一条盯的是"取到的到底是不是脚"：
+    #    `FL_foot` 在 MJCF 里是个空 body，位置正好压在脚底球心上（calf 系下 0 0 -0.213），
+    #    但转 USD 时可能被并进 `*_calf` —— 那样 `body_pos_w` 拿到的是**膝关节**，
+    #    比球心高 0.21 m。差这 0.21 m 不报错、不崩，只是支撑面高度整体偏一个身位，
+    #    而 climb / level_bonus / base_height / is_fallen 全吃它。
+    #    判据：站住时脚底球心离地 ≈ 球半径 0.022，膝关节则约 0.235。
+    #    取 50 拍里的最小值，避开"刚 reset 完还在空中"和"中途超时重置"那几拍。
+    gaps = []
+    for _ in range(50):
+        env.step(zero)
+        s = state.get_state(env)
+        p = env.scene["robot"].data.body_pos_w
+        gaps.append(float((p[0, ctx.foot_body_ids, 2] - s.terrain_h[0]).min()))
+    gap = min(gaps)
+    ok(gap < 0.12, "四只脚离支撑面的高度（脚底没被解析成小腿）",
+       f"最低的脚离支撑面 {gap:.3f} m，实得 body {list(ctx.foot_body_names)}"
+       "（≈0.02 正常 = 脚底球半径；≈0.23 说明 _resolve 退到了 *_calf，"
+       "采样点整体偏了 0.21 m，要按 foot.obj/球心的实际位置补偏移）")
+
 
 # ==================================================================== 落地
 

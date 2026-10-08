@@ -22,6 +22,7 @@ from __future__ import annotations
 import pathlib
 import sys
 
+import mujoco
 import numpy as np
 import torch
 
@@ -131,11 +132,11 @@ def synthetic_state(env, n: int, rng: np.random.Generator) -> dict:
     y[7:9] = [cfg.out_y, cfg.out_y + 1e-9]  # 横向出界（等于阈值 / 差一点）
     z[7:9] = 0.3
 
-    # --- 摔倒的边界：z - 当地地形高度 恰好等于 / 差一点小于 fall_clearance
-    x[9], y[9] = 3.0, 0.0     # 台阶中段（地形高度不为 0，才测得出"相对当地地形"）
+    # --- 摔倒的边界：z - 支撑面高度 恰好等于 / 差一点小于 fall_clearance
+    # z 这里钉不了：支撑面取自**四只脚**，得先把姿态摆进 MuJoCo 才读得到，
+    # 由 check_synthetic 补（理由见 terrain.support_height）。
+    x[9], y[9] = 3.0, 0.0     # 台阶中段（支撑面高度不为 0，才测得出"相对脚下地面"）
     x[10], y[10] = 2.0, 0.0   # 第 1 级台阶前
-    z[9] = env.terrain.top(x[9], y[9]) + cfg.fall_clearance
-    z[10] = env.terrain.top(x[10], y[10]) + cfg.fall_clearance - 1e-9
     x[11], y[11], z[11] = 3.3, 0.0, 1.2  # 顶平台上正常站立（成功判据该为真）
 
     # --- 翻转的边界：|roll| 或 |pitch| 恰好等于 flip_rad
@@ -143,12 +144,9 @@ def synthetic_state(env, n: int, rng: np.random.Generator) -> dict:
                                        (0.0, cfg.flip_rad + 1e-9), (0.5, 0.5)]):
         quat[i] = roll_pitch_yaw_to_quat(roll, pitch, 0.0)
 
-    # 上一拍的位置错开一点，让 progress / climb / level_bonus 三项都非零
+    # 上一拍的位置错开一点，让 progress / climb / level_bonus 三项都非零。
+    # prev_terrain_* 同理得等四只脚读出来（check_synthetic 里补）。
     prev_x = x - rng.uniform(-0.05, 0.05, n)
-    prev_terrain_h = np.array([env.terrain.top(float(px), float(yi))
-                               for px, yi in zip(prev_x, y)])
-    prev_terrain_level = np.array([env.terrain.level(float(px), float(yi))
-                                   for px, yi in zip(prev_x, y)])
 
     lo, hi = env.q_lo, env.q_hi  # 关节角铺满整个限位范围
     q = rng.uniform(-1.0, 1.0, (n, 12)) * (hi - lo) / 2 + (lo + hi) / 2
@@ -164,10 +162,28 @@ def synthetic_state(env, n: int, rng: np.random.Generator) -> dict:
         "prev_action": rng.uniform(-1.0, 1.0, (n, 12)),
         "contact_force": rng.uniform(0.0, 200.0, n),
         "prev_x": prev_x,
-        "prev_terrain_h": prev_terrain_h,
-        "prev_terrain_level": prev_terrain_level,
         "cmd_vx": rng.uniform(*cfg.cmd_vx, n),
     }
+
+
+def _pose(env, f: dict, i: int) -> None:
+    """把第 i 个合成状态写进 `env.data` 并**前推一次**。
+
+    `mj_forward` 不能省：`geom_xpos` 只在 `mj_step`/`mj_forward` 里更新，只写 qpos 的话
+    四只脚还停在上一个状态的位姿上，`env._support_height()` 读到的是别人脚下那片地形。
+    """
+    env.data.qpos[:3] = f["base_pos"][i]
+    env.data.qpos[3:7] = f["quat"][i]
+    env.data.qpos[env.qadr] = f["q"][i]
+    env.data.qvel[:3] = f["base_v"][i]
+    env.data.qvel[3:6] = f["base_w"][i]
+    env.data.qvel[env.vadr] = f["dq"][i]
+    mujoco.mj_forward(env.model, env.data)
+
+
+def _feet_xy(env) -> np.ndarray:
+    """当前位姿下四只脚的 (x, y)，(脚数, 2)。"""
+    return env.data.geom_xpos[env.foot_geom_ids][:, :2].copy()
 
 
 def _env_obs(env, f: dict, i: int) -> np.ndarray:
@@ -177,12 +193,7 @@ def _env_obs(env, f: dict, i: int) -> np.ndarray:
     推进、再构造返回的观测，所以步 t 的观测里装的是 a_t。刻意喂和 `prev_action` 不同的值，
     这样"core 的观测取错了字段"会被立刻抓到（改对之前这里确实红过）。
     """
-    env.data.qpos[:3] = f["base_pos"][i]
-    env.data.qpos[3:7] = f["quat"][i]
-    env.data.qpos[env.qadr] = f["q"][i]
-    env.data.qvel[:3] = f["base_v"][i]
-    env.data.qvel[3:6] = f["base_w"][i]
-    env.data.qvel[env.vadr] = f["dq"][i]
+    _pose(env, f, i)
     env.prev_action = f["action"][i]
     env.cmd_vx = float(f["cmd_vx"][i])
     return env._obs()
@@ -227,6 +238,15 @@ def check_torch_terrain(env, ct: core.CourseTerrain, tag: str) -> None:
     check(note_diff(f"{tag}: 地形top_footprint", got_fp, want_fp) == 0.0,
           f"{tag}: torch 地形 top_footprint 与 MuJoCo 不一致")
 
+    # 支撑面：把采样点四四分组成"四只脚"，两边逐位比。样本里既有全在同一级的，
+    # 也有横跨两级/三级台阶的（棱附近的点被刻意采进来了）。
+    m = (x.size // 4) * 4
+    feet = np.stack([x[:m], y[:m]], axis=1).reshape(-1, 4, 2)
+    want_sh = np.array([env.terrain.support_height(g) for g in feet])
+    got_sh = ct.support_height(_t(feet)).numpy()
+    check(note_diff(f"{tag}: 支撑面高度", got_sh, want_sh) == 0.0,
+          f"{tag}: torch 支撑面高度与 MuJoCo 不一致")
+
 
 def check_synthetic(env, ct: core.CourseTerrain, tag: str, rng: np.random.Generator,
                     n: int = 512) -> None:
@@ -234,14 +254,42 @@ def check_synthetic(env, ct: core.CourseTerrain, tag: str, rng: np.random.Genera
     cfg, reward_cfg = env.cfg, env.reward_cfg
     f = synthetic_state(env, n, rng)
 
-    # --- 地形：core 自己算的必须等于 MuJoCo 算的（同一批点，逐位）
-    th = ct.top(_t(f["base_pos"][:, 0]), _t(f["base_pos"][:, 1])).numpy()
-    lv = ct.level(_t(f["base_pos"][:, 0]), _t(f["base_pos"][:, 1])).numpy()
-    want_th = np.array([env.terrain.top(float(a), float(b)) for a, b in f["base_pos"][:, :2]])
-    want_lv = np.array([env.terrain.level(float(a), float(b)) for a, b in f["base_pos"][:, :2]])
-    check(note_diff(f"{tag}: 地形top(合成)", th, want_th) == 0.0,
-          f"{tag}: 合成状态里 torch 地形 top 与 MuJoCo 不一致")
-    check(np.array_equal(lv, want_lv), f"{tag}: 合成状态里 level 不一致")
+    # --- 支撑面：把每个状态摆进 MuJoCo，读**四只脚**的位置，两边吃同一批点。
+    # 支撑面是 climb / level_bonus / base_height / is_fallen 的全部地形输入，
+    # 所以这里既要"两边同点同值"，也要确认它确实来自脚而不是机身中心。
+    feet = np.empty((n, env.foot_geom_ids.size, 2))
+    want_th = np.empty(n)
+    for i in range(n):
+        _pose(env, f, i)
+        feet[i] = _feet_xy(env)
+        want_th[i] = env._support_height()
+
+    th = ct.support_height(_t(feet)).numpy()
+    lv = ct.level_at_height(_t(th)).numpy()
+    want_lv = np.array([env.terrain.level_at_height(float(h)) for h in want_th])
+    check(note_diff(f"{tag}: 支撑面高度(合成)", th, want_th) == 0.0,
+          f"{tag}: 合成状态里 torch 支撑面高度与 MuJoCo 不一致")
+    check(np.array_equal(lv, want_lv), f"{tag}: 合成状态里 level_at_height 不一致")
+
+    # 四只脚分散在两级台阶上时（最常见的跨步姿态），中位数必须落在**两级之间**：
+    # 这一条盯的是 torch 侧误用 `torch.median`（偶数个样本它取中间偏下那个，正好差半级）。
+    straddle = np.array([[[0.0, 0.0], [0.0, 0.0], [2.2, 0.0], [2.2, 0.0]],
+                         [[0.0, 0.0], [2.2, 0.0], [2.4, 0.0], [2.4, 0.0]]])
+    want_straddle = np.array([env.terrain.support_height(p) for p in straddle])
+    got_straddle = ct.support_height(_t(straddle)).numpy()
+    check(note_diff(f"{tag}: 跨级中位数", got_straddle, want_straddle) == 0.0,
+          f"{tag}: 四只脚横跨台阶时的中位数不一致（torch 侧别用 torch.median）")
+
+    # 补上"摔倒边界"那两行：支撑面高度只取决于脚，所以现在才填得了 z
+    f["base_pos"][9, 2] = want_th[9] + cfg.fall_clearance
+    f["base_pos"][10, 2] = want_th[10] + cfg.fall_clearance - 1e-9
+
+    # 上一拍的支撑面：把四只脚整体平移到 prev_x（真实上一拍无从合成，
+    # 只要两边吃到的是同一份数，climb / level_bonus 的符号就能被覆盖到）
+    prev_feet = feet + (f["prev_x"] - f["base_pos"][:, 0])[:, None, None] * np.array([1.0, 0.0])
+    f["prev_terrain_h"] = np.array([env.terrain.support_height(p) for p in prev_feet])
+    f["prev_terrain_level"] = np.array(
+        [env.terrain.level_at_height(float(h)) for h in f["prev_terrain_h"]])
 
     st = to_core_state(f, th, lv)
 
@@ -260,7 +308,8 @@ def check_synthetic(env, ct: core.CourseTerrain, tag: str, rng: np.random.Genera
     tm = core.terminations(st, cfg, goal_z)
     want_map = {
         "success": np.array([mj_terrain.is_success(cfg, p) for p in f["base_pos"]]),
-        "fallen": np.array([mj_terrain.is_fallen(cfg, env.terrain, p) for p in f["base_pos"]]),
+        "fallen": np.array([mj_terrain.is_fallen(cfg, float(want_th[i]), p)
+                            for i, p in enumerate(f["base_pos"])]),
         "flipped": np.array([mj_terrain.is_flipped(cfg, quat_to_rpy(q)) for q in f["quat"]]),
         "out_of_course": np.array([mj_terrain.is_out_of_course(cfg, p) for p in f["base_pos"]]),
     }
@@ -310,6 +359,8 @@ def rollout_fields(env, action, prev: dict) -> dict:
         "tau": d.actuator_force[None, :].copy(),
         "action": np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)[None, :],
         "contact_force": np.array([env._contact_force()]),
+        # 四只脚的课程坐标，(1, 脚数, 2)：支撑面高度取自这里（不是机身中心）
+        "foot_xy": _feet_xy(env)[None, :, :],
         "cmd_vx": np.array([env.cmd_vx]),
         "prev_x": np.array([prev["prev_x"]]),
         "prev_action": np.asarray(prev["prev_action"], dtype=np.float64)[None, :].copy(),
@@ -341,11 +392,14 @@ def check_rollout(env, ct: core.CourseTerrain, tag: str, rng: np.random.Generato
             obs_mj, rew, term, trunc, info = env.step(action)
             f = rollout_fields(env, action, prev)
 
-            # 地形：用 core 的 torch 值喂 State，同时和 env 的比（每一步都盯）
-            th = ct.top(_t(f["base_pos"][:, 0]), _t(f["base_pos"][:, 1])).numpy()
-            lv = ct.level(_t(f["base_pos"][:, 0]), _t(f["base_pos"][:, 1])).numpy()
-            check(th[0] == env.terrain.top(float(f["base_pos"][0, 0]), float(f["base_pos"][0, 1])),
-                  f"{tag}: rollout 第 {t} 步地形高度不一致")
+            # 支撑面：用 core 的 torch 值喂 State，同时和 env 这一步真正用的值比（每一步都盯）。
+            # 比的是 `info["terrain_h"]` 而不是现算一遍——那是 step() 内部的实际输入，
+            # 顺便把"geom_xpos 没前推、读到上一拍的脚"这类时序错也一起抓了。
+            th = ct.support_height(_t(f["foot_xy"])).numpy()
+            lv = ct.level_at_height(_t(th)).numpy()
+            check(th[0] == info["terrain_h"],
+                  f"{tag}: rollout 第 {t} 步支撑面高度不一致"
+                  f"（core={th[0]:.9f} env={info['terrain_h']:.9f}）")
             st = to_core_state(f, th, lv)
 
             got_obs = core.obs(st, env.cfg, env.q_default).numpy()[0]

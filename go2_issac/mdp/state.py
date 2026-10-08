@@ -167,14 +167,33 @@ def course_xy(env, pos_w: torch.Tensor) -> torch.Tensor:
     return pos_w[:, :2].to(F64) - env.scene.env_origins[:, :2].to(F64) - off
 
 
-def terrain_h_and_level(ctx: Ctx, xy_course: torch.Tensor):
-    """(当地地形高度, 站上第几级)，(N,) 各一。
+def foot_course_xy(env, pos_w_bodies: torch.Tensor) -> torch.Tensor:
+    """四只脚的课程坐标，(N, 脚数, 2)。
 
-    入参是**课程坐标** `xy`（先用 `course_xy` 换算过，见 `get_state`）——
-    这里不再接世界系，免得两个"看起来都能传"的入参在调用处混掉。
+    与 `course_xy` 同一套换算（同一个 `COURSE_ORIGIN_FROM_ENV_ORIGIN`），只是多了"脚"这一维
+    ——`course_xy` 是 `pos_w[:, :2] - origins[:, :2]`，对 (N, K, 3) 的入参会广播错，
+    所以这里把 origins 补一维，不共用那个函数。
+
+    `pos_w_bodies` 传**脚底 body** 的位置。注意 `_resolve` 在 `FL_foot` 被并进小腿时
+    会退到 `*_calf`，那是膝关节而不是脚底（差约 0.2 m）——`smoke.py --check-asset`
+    会打印实际解析到哪个，真机上以那个为准。
     """
-    return (ctx.terrain.top(xy_course[:, 0], xy_course[:, 1]),
-            ctx.terrain.level(xy_course[:, 0], xy_course[:, 1]))
+    off = torch.tensor(course.COURSE_ORIGIN_FROM_ENV_ORIGIN, dtype=F64, device=pos_w_bodies.device)
+    return (pos_w_bodies[..., :2].to(F64)
+            - env.scene.env_origins[:, None, :2].to(F64) - off)
+
+
+def terrain_h_and_level(ctx: Ctx, xy_feet_course: torch.Tensor):
+    """(支撑面高度, 站上第几级)，(N,) 各一。
+
+    入参是**四只脚的课程坐标** `(N, 脚数, 2)`（先用 `foot_course_xy` 换算过，见 `get_state`）
+    ——**不是机身中心**。地形在台阶立面处不连续，用机身中心的 (x, y) 会让狗在脚还全在平地上、
+    只是机身探到台阶上方时，就把整级台阶的 `climb`/`level_bonus` 领走（实测证据见
+    `go2_common/terrain.py:TerrainHeight.support_height` 的注释）。这里不再接世界系，
+    也刻意不接单点 xy，免得两个"看起来都能传"的入参在调用处混掉。
+    """
+    support = ctx.terrain.support_height(xy_feet_course)
+    return support, ctx.terrain.level_at_height(support)
 
 
 def action_joint_names(term) -> list[str]:
@@ -243,7 +262,10 @@ def get_state(env) -> core.State:
     # **每步都重置**）、`prev_action` 恒为 0（重置清空了 `raw_actions`，而观测在重置之后算）、
     # `progress` 奖励每步白拿一次"出生点位移"（权重 100，差值 7.3e3）。
     xy = course_xy(env, pos_w)
-    terrain_h, terrain_level = terrain_h_and_level(ctx, xy)
+    # 支撑面取自**四只脚**，不是机身中心（理由见 terrain_h_and_level）
+    terrain_h, terrain_level = terrain_h_and_level(
+        ctx, foot_course_xy(env, d.body_pos_w[:, ctx.foot_body_ids])
+    )
     base_pos = torch.cat([xy, pos_w[:, 2:3]], dim=-1)
 
     prev = getattr(env, "_course_prev", None)
