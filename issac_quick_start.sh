@@ -21,11 +21,9 @@ cd RL-Learn-Hub
 git clone https://github.com/unitreerobotics/unitree_mujoco.git
 
 # 画面回传
-wget -q -O- https://packagecloud.io/dcommander/virtualgl/gpgkey | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/VirtualGL.gpg > /dev/null
-sudo wget -O /etc/apt/sources.list.d/VirtualGL.list https://raw.githubusercontent.com/VirtualGL/repo/main/VirtualGL.list
-sudo apt update
-sudo apt install virtualgl
-sudo sv stop gdm  # 停止图形界面,服务器使用sv而非systemctl
-sudo /opt/VirtualGL/bin/vglserver_config # 选1
-# sudo apt install libnvidia-cfg1-595
-# nvidia-xconfig --query-gpu-info
+# 注意：本机驱动是宿主机的 595.84，而 Isaac Sim 5.1 的 RTX renderer 在 595.xx 分支上会崩
+# (librtx.scenedb.plugin.so，NVIDIA 已知问题，官方验证驱动为 580.65.06)。
+# 驱动没降到 580 之前，下面这条 --livestream 命令一定会 core dump，去掉 --livestream 1 可正常训练。
+ulimit -c 0   # 免得每次崩溃在仓库里写出 16GB 的 core.* 文件
+PUBLIC_IP=10.160.17.102 python3 go2_issac/train.py \
+    --terrain flat --steps 2000000 --headless --livestream 1
