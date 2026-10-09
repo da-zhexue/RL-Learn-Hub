@@ -42,7 +42,6 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sim import (
     ArticulationRootPropertiesCfg,
-    PhysxCfg,
     RigidBodyMaterialCfg,
     RigidBodyPropertiesCfg,
     SimulationCfg,
@@ -50,6 +49,10 @@ from isaaclab.sim import (
 )
 from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
 from isaaclab.utils import configclass
+# Isaac Lab 3.0 起物理后端可插拔：`PhysxCfg` 从 `isaaclab.sim` 搬进了独立包 `isaaclab_physx`，
+# `SimulationCfg` 上的字段也从 `physx=` 改名成 `physics=`（见下面 `CourseEnvCfg.sim`）。
+# 3.0 的默认后端是 Newton(MJWarp)；这里继续显式给 PhysX——MuJoCo 对拍是按 PhysX 那套做的。
+from isaaclab_physx.physics import PhysxCfg
 
 HERE = pathlib.Path(__file__).resolve().parent
 GO2_USD = str(HERE / "assets" / "go2.usd")
@@ -303,7 +306,7 @@ class CourseEnvCfg(ManagerBasedRLEnvCfg):
     sim: SimulationCfg = SimulationCfg(
         dt=_REF.sim_dt,                       # 0.005 s，和 MuJoCo 侧一致
         render_interval=int(_REF.decimation),  # 4 -> 策略 50 Hz
-        physx=PhysxCfg(
+        physics=PhysxCfg(
             solver_type=1,          # TGS：Isaac Lab 默认，接触稳定性和 MuJoCo 最接近的一档
             gpu_max_rigid_contact_count=2**23,
             gpu_max_rigid_patch_count=2**23,

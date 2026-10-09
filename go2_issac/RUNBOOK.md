@@ -160,14 +160,16 @@ python3 go2_issac/smoke.py --all --num-envs 4               # 其余五节
 
 ```bash
 # 1) 平地跑稳
-python3 go2_issac/train.py --terrain flat  --steps 200_000 --num-envs 512 --headless
+python3 go2_issac/train.py --terrain flat  --steps 200_000 --num-envs 512 --visualizer none
 
 # 2) 过两个 0.08 m 的槛
-python3 go2_issac/train.py --terrain steps --steps 100_000 --num-envs 512 --headless
+python3 go2_issac/train.py --terrain steps --steps 100_000 --num-envs 512 --visualizer none
 
 # 3) 爬六级台阶
-python3 go2_issac/train.py --terrain full  --steps 150_000 --num-envs 2048 --headless
+python3 go2_issac/train.py --terrain full  --steps 150_000 --num-envs 2048 --visualizer none
 ```
+
+（Isaac Lab 3.0 起没有 `--headless` 了：无头 = `--visualizer none`，不带这个参数会去开窗口。）
 
 课程顺序和 MuJoCo 侧完全一样，先易后难。`--steps` 是**总转移数**（各环境求和），
 和 `go2_ppo` 同口径。
@@ -195,7 +197,7 @@ tensorboard --logdir models/
 ### 续训
 
 ```bash
-python3 go2_issac/train.py --steps 50_000 --resume models/go2_issac_full_20261007_120000 --headless
+python3 go2_issac/train.py --steps 50_000 --resume models/go2_issac_full_20261007_120000 --visualizer none
 ```
 
 给目录会自动挑迭代数最大的 `model_<n>.pt`。给 `.zip` 会被直接拒绝（跨仿真器，见 §0）。
@@ -209,7 +211,7 @@ python3 go2_issac/train.py --steps 50_000 --resume models/go2_issac_full_2026100
 python3 go2_issac/play.py --resume models/go2_issac_full_20261007_120000 --episodes 5
 
 # 没显示器
-python3 go2_issac/play.py --resume <目录> --episodes 10 --headless
+python3 go2_issac/play.py --resume <目录> --episodes 10 --visualizer none
 ```
 
 环境参数（哪档地形、缩放、`action_scale`、观测维度）**全部从存档同目录的 `config.json`

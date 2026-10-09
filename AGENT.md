@@ -100,7 +100,7 @@ python3 -m go2_issac.tests.course_parity     # ← 这两条本机就能跑（�
 python3 -m go2_issac.tests.core_parity
 python3 go2_issac/convert_assets.py
 python3 go2_issac/smoke.py --all --num-envs 4
-python3 go2_issac/train.py --terrain flat --steps 200_000 --num-envs 512 --headless
+python3 go2_issac/train.py --terrain flat --steps 200_000 --num-envs 512 --visualizer none
 python3 go2_issac/play.py --resume models/go2_issac_flat_xxx
 ```
 

@@ -13,3 +13,4 @@ go2_issac/assets/*.usda
 go2_issac/assets/*.usdc
 **.zip
 core.*
+**.etli

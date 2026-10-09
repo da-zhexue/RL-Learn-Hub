@@ -1,7 +1,7 @@
 """回放训练好的策略（Isaac Sim 里看狗跑）。**只能在有 NVIDIA 显卡的机器上跑**。
 
     python3 go2_issac/play.py --resume models/go2_issac_full_20261007_120000
-    python3 go2_issac/play.py --resume <那个目录>/model_500.pt --episodes 10 --headless
+    python3 go2_issac/play.py --resume <那个目录>/model_500.pt --episodes 10 --visualizer none
 
 环境参数（哪档地形、多大的缩放、action_scale、观测维度）**全部从存档同目录的
 `config.json` 里还原**，不重新猜——观测维度或奖励权重对不上时，策略不会报错，
@@ -17,6 +17,7 @@ import argparse
 import json
 import pathlib
 import sys
+from importlib.metadata import version
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -92,7 +93,7 @@ def main(argv=None) -> int:
     simulation_app = app_launcher.app
 
     import torch
-    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
+    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
     from rsl_rl.runners import OnPolicyRunner
 
     from go2_issac import env_cfg as ec
@@ -106,6 +107,9 @@ def main(argv=None) -> int:
 
     agent_cfg = Go2IsaacPPORunnerCfg()
     agent_cfg.device = getattr(args, "device", "cuda:0")
+    # 同 `train.py`：rsl-rl 5.x 要先把废弃字段（`stochastic` 等）从配置里摘掉再 `to_dict()`，
+    # 否则建 runner 时 `MLPModel` 收到不认识的参数直接 TypeError
+    handle_deprecated_rsl_rl_cfg(agent_cfg, version("rsl-rl-lib"))
 
     env = ec.build_env(cfg)
     env = RslRlVecEnvWrapper(env)
@@ -118,7 +122,9 @@ def main(argv=None) -> int:
     print(f"  已加载 {args.resume_path}")
 
     # 回合上限 = 1000 步（20 s @50 Hz）；多跑一点余量，免得刚好卡在边界上
-    limit = args.steps or (args.episodes * (int(cfg.episode_length_s / env.step_dt) + 2))
+    # （3.0 起 `RslRlVecEnvWrapper` 不再透传未知属性，2.3 时能直接 `env.step_dt`；
+    #   `step_dt` 在底下的 `ManagerBasedRLEnv` 上，走 `unwrapped` 拿）
+    limit = args.steps or (args.episodes * (int(cfg.episode_length_s / env.unwrapped.step_dt) + 2))
     n_done, seen, run_steps = 0, 0, 0
     obs, _ = _reset(env)
     try:
