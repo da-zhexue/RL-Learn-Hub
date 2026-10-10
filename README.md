@@ -135,7 +135,7 @@ go2_ppo/*.py               同上，把算法换成 PPO
 | `--n-envs N` | `8` | 并行环境数。SAC 下买的是多样性不是速度；PPO 下一轮 rollout = `n_steps × n_envs` |
 | `--seed N` | `0` | 随机种子 |
 | `--save-dir DIR` | 见左 | 默认 `models/go2_sac_<地形>[_s<缩放>]_<时间戳>/`（PPO 则是 `go2_ppo_...`） |
-| `--resume PATH` | 无 | 接着训，`.zip` 可省略；会读它同目录（找不到就往上一层找）的 `config.json`。PPO 只能续 PPO 自己的模型 |
+| `--resume PATH` | 无 | 接着训，`PATH` **不带后缀**（`models/xxx/best/best_model`、`.../checkpoints/rl_50000_steps`；写了 `.zip` 也认）；会读它同目录（找不到就往上一层找）的 `config.json`，并自动加载旁边的 replay buffer（同名 `.pkl`，或 CheckpointCallback 的 `*_replay_buffer_*_steps.pkl`）。路径写错会直接报错，不会静默从头训。PPO 只能续 PPO 自己的模型 |
 | `--privileged` | 关 | 观测里加 1 维机身离地高度（真机上没有，仅作对照）：45 维 → 46 维 |
 | `--reset-x LO HI` | `-0.3 0.3` | 起点 x 的随机范围，例如 `--reset-x 1.20 2.05` 直接练爬台阶 |
 | `--terrain-scale S` | `1.0` | 地形高度整体缩放（课程用）：`1.0`=原场景、`0`=平地。x/y 脚印不变，只压矮高度 |
@@ -170,7 +170,7 @@ go2_ppo/*.py               同上，把算法换成 PPO
 从头练默认预热，续练默认不预热，想要修改通过--seed-trot设置。
 
 #### 课程
-课程设置将原先较复杂的任务拆分为难度逐渐递增的任务，比如先学会平地跑，再学会上矮台阶，再学上高台阶，最后再跑完整任务。课程可以减少训练步数，降低落入局部最优解的可能。  
+课程设置将原先较复杂的任务拆分为难度逐渐递增的任务，比如先学会平地跑，再学会上矮台阶，再学上高台阶，最后再跑完整任务。课程可以减少训练步数，降低落入局部最优解的可能。续训时应该加载上次训练的旧replay buffer，之前转阶段时reward会快速下降大概就是因此。  
   
 从头训：
 ```
@@ -188,34 +188,34 @@ python3 -m go2_sac.train --terrain steps --terrain-scale 0.70 --action-scale 0.6
     --save-dir models/go2_sac_steps_s0.70 --resume models/go2_sac_flat_xx/...
 python3 -m go2_sac.train --terrain steps --terrain-scale 0.86 --action-scale 0.6 \
     --learning-rate 2e-4 --fresh-reward --reset-x -0.3 0.95 --steps 250_000 \
-    --save-dir models/go2_sac_steps_s0.86 --resume models/go2_sac_steps_s0.70/model.zip
+    --save-dir models/go2_sac_steps_s0.86 --resume models/go2_sac_steps_s0.70/model
 python3 -m go2_sac.train --terrain steps --terrain-scale 1.00 --action-scale 0.6 \
     --learning-rate 2e-4 --fresh-reward --reset-x -0.3 0.95 --steps 250_000 \
-    --save-dir models/go2_sac_steps_s1.00 --resume models/go2_sac_steps_s0.86/model.zip
+    --save-dir models/go2_sac_steps_s1.00 --resume models/go2_sac_steps_s0.86/model
 ```
 
 ```
 python3 -m go2_sac.train --terrain full --terrain-scale 0.56 --action-scale 0.7 \
     --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 200_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s0.56 --resume models/go2_sac_steps_s1.00/model.zip  # 首级 0.095 m
+    --save-dir models/go2_sac_full_s0.56 --resume models/go2_sac_steps_s1.00/model  # 首级 0.095 m
 python3 -m go2_sac.train --terrain full --terrain-scale 0.62 --action-scale 0.7 \
     --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 250_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s0.62 --resume models/go2_sac_full_s0.56/model.zip   # 0.105 m
+    --save-dir models/go2_sac_full_s0.62 --resume models/go2_sac_full_s0.56/model   # 0.105 m
 python3 -m go2_sac.train --terrain full --terrain-scale 0.70 --action-scale 0.7 \
     --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 250_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s0.70 --resume models/go2_sac_full_s0.62/model.zip   # 0.119 m
+    --save-dir models/go2_sac_full_s0.70 --resume models/go2_sac_full_s0.62/model   # 0.119 m
 python3 -m go2_sac.train --terrain full --terrain-scale 0.78 --action-scale 0.7 \
     --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 250_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s0.78 --resume models/go2_sac_full_s0.70/model.zip   # 0.133 m
+    --save-dir models/go2_sac_full_s0.78 --resume models/go2_sac_full_s0.70/model   # 0.133 m
 python3 -m go2_sac.train --terrain full --terrain-scale 0.86 --action-scale 0.7 \
     --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 250_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s0.86 --resume models/go2_sac_full_s0.78/model.zip   # 0.146 m
+    --save-dir models/go2_sac_full_s0.86 --resume models/go2_sac_full_s0.78/model   # 0.146 m
 python3 -m go2_sac.train --terrain full --terrain-scale 0.93 --action-scale 0.7 \
     --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 300_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s0.93 --resume models/go2_sac_full_s0.86/model.zip   # 0.158 m
+    --save-dir models/go2_sac_full_s0.93 --resume models/go2_sac_full_s0.86/model   # 0.158 m
 python3 -m go2_sac.train --terrain full --terrain-scale 1.00 --action-scale 0.7 \
     --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 350_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s1.00 --resume models/go2_sac_full_s0.93/model.zip   # 原尺寸 0.170 m
+    --save-dir models/go2_sac_full_s1.00 --resume models/go2_sac_full_s0.93/model   # 原尺寸 0.170 m
 ```
 
 #### 训练过程查看

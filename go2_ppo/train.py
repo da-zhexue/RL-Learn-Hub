@@ -128,7 +128,8 @@ def main(argv=None):
 
     # 先确定环境：--resume 时以模型的 config.json 为准，命令行显式给的参数再覆盖它。
     # 顺序不能反——反过来会出现"想练台阶但环境还是平地"这种静默错误。
-    resume_path = resolve_model_path(args.resume) if args.resume else None
+    # PPO 是 on-policy，没有 replay buffer，只要模型那半边
+    resume_path, _ = (None, None) if not args.resume else resolve_model_path(args.resume)
     if resume_path is not None:
         env_cfg, reward_cfg = load_resume_configs(resume_path)
         if env_cfg is None:

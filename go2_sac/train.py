@@ -206,7 +206,7 @@ def main(argv=None):
 
     # 先确定环境：--resume 时以模型的 config.json 为准，命令行显式给的参数再覆盖它。
     # 顺序不能反——反过来会出现"想练台阶但环境还是平地"这种静默错误。
-    resume_path = resolve_model_path(args.resume) if args.resume else None
+    resume_path, replay_buffer_path = (None, None) if not args.resume else resolve_model_path(args.resume)
     if resume_path is not None:
         env_cfg, reward_cfg = load_resume_configs(resume_path)
         if env_cfg is None:
@@ -294,9 +294,13 @@ def main(argv=None):
 
     if resume_path is not None:
         model = SAC.load(str(resume_path), env=vec_env, device="cpu", tensorboard_log=str(tb_dir))
+        if replay_buffer_path is not None:
+            model.load_replay_buffer(str(replay_buffer_path))
+            print(f"  已从 {replay_buffer_path} 加载 replay buffer")
+        else:
+            print(f"  ! {resume_path} 旁边没找到 replay buffer（同名 .pkl 或 *_replay_buffer_*.pkl），"
+                  f"buffer 从空开始：续训会收敛慢甚至不收敛")
         # 续训必须显式把超参再盖回去：SAC.load() 不传 kwargs，checkpoint 里存的超参
-        # 会整个恢复、静默压掉命令行给的（见 AGENT.md §5-A1）。
-        # 光 setattr("learning_rate") 不够，要连 lr_schedule 一起换。
         changed = {}
         for name, want in (
             ("learning_rate", train_cfg.learning_rate),
@@ -358,11 +362,12 @@ def main(argv=None):
             save_freq=max(1, train_cfg.checkpoint_freq // args.n_envs),
             save_path=str(run_dir / "checkpoints"),
             name_prefix="rl",
+            save_replay_buffer=True,
             verbose=0,
         ),
         EvalMetricsCallback(
             env_cfg, reward_cfg, train_cfg.eval_freq, train_cfg.eval_episodes,
-            save_dir=run_dir / "best", verbose=1,
+            save_dir=run_dir / "best", verbose=1, save_buffer=True,
         ),
     ]
 
@@ -373,9 +378,10 @@ def main(argv=None):
     elapsed = time.perf_counter() - t0
 
     model.save(str(run_dir / "model.zip"))
+    model.save_replay_buffer(str(run_dir / "model.pkl"))
     vec_env.close()
     print(f"训练结束：{elapsed / 60:.1f} 分钟，实测 {args.steps / elapsed:,.0f} 步/秒")
-    print(f"模型已保存到 {run_dir / 'model.zip'}")
+    print(f"模型已保存到 {run_dir / 'model.zip'}（replay buffer：同目录 model.pkl）")
     print(f"回放：python3 -m go2_sac.play --mode viewer --model {run_dir / 'model.zip'}")
 
 

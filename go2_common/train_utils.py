@@ -36,7 +36,7 @@ class EvalMetricsCallback(BaseCallback):
     （成功率、最高台阶）在 info 里。自己起一个**非向量化**的环境跑，最简单可靠。
     """
 
-    def __init__(self, env_cfg, reward_cfg, eval_freq, n_episodes, save_dir, verbose=0):
+    def __init__(self, env_cfg, reward_cfg, eval_freq, n_episodes, save_dir, verbose=0, save_buffer=False):
         super().__init__(verbose)
         self.eval_env = Go2TerrainEnv(env_cfg, reward_cfg)
         self.eval_freq = eval_freq
@@ -44,6 +44,7 @@ class EvalMetricsCallback(BaseCallback):
         self.save_dir = pathlib.Path(save_dir)
         self.best_reward = -np.inf
         self.last_eval = 0
+        self.save_buffer = save_buffer
 
     def _act(self, obs, env):
         action, _ = self.model.predict(obs, deterministic=True)
@@ -107,21 +108,43 @@ class EvalMetricsCallback(BaseCallback):
         if mean_reward > self.best_reward:
             self.best_reward = mean_reward
             self.save_dir.mkdir(parents=True, exist_ok=True)
+            if self.save_buffer:
+                self.model.save_replay_buffer(str(self.save_dir / "best_model.pkl")) # 方便加载取相同名字，实际best_model.pkl为replay buffer
             self.model.save(str(self.save_dir / "best_model.zip"))
         return True
 
 
-def resolve_model_path(path) -> pathlib.Path:
-    """把用户给的模型路径补全成实际存在的 .zip。
+def find_replay_buffer(model_path: pathlib.Path):
+    """找模型旁边的 replay buffer，没有就返回 None。
 
-    SAC.load 只在"路径本身没写后缀"时才帮忙补 .zip；写了 `.../rl_1000000_steps` 这种
-    没后缀的文件名时它会直接去找 `rl_1000000_steps.zip` 然后报 FileNotFoundError。
+    两种命名都认：
+      - 与模型同名：`best_model.zip` / `model.zip` 旁边的 `best_model.pkl` / `model.pkl`
+      - CheckpointCallback 的：`rl_1000000_steps.zip` 旁边的 `rl_replay_buffer_1000000_steps.pkl`
+        （SB3 在前缀后面插了 "replay_buffer_"，见 callbacks.py 的 `_checkpoint_path`）
+    第二种按"步数后缀"去 glob，不硬拼名字——`name_prefix` 里可能还有下划线。
+    """
+    same_name = pathlib.Path(str(model_path)[: -len(".zip")] + ".pkl")
+    if same_name.exists():
+        return same_name
+    steps_tail = "_".join(model_path.stem.rsplit("_", 2)[-2:])  # "1000000_steps"
+    hits = sorted(model_path.parent.glob(f"*_replay_buffer_{steps_tail}.pkl"))
+    return hits[0] if hits else None
+
+
+def resolve_model_path(path):
+    """把 `--resume` 给的路径解析成 (模型 .zip, replay buffer .pkl 或 None)。
+
+    传进来的按**不带后缀**写（`models/xxx/best/best_model`），写了 `.zip` 也认。
+    模型 .zip 找不到时直接报错：返回 None 会让 `--resume` 静默退化成从头训练，
+    而课程脚本里这是最贵的一种错。buffer 的命名见 `find_replay_buffer`。
     """
     p = pathlib.Path(path)
-    if p.exists():
-        return p
-    with_zip = pathlib.Path(str(p) + ".zip")
-    return with_zip if with_zip.exists() else p
+    if p.suffix in (".zip", ".pkl"):  # 后缀可省，写了也认
+        p = pathlib.Path(str(p)[: -len(p.suffix)])
+    model_path = pathlib.Path(str(p) + ".zip")
+    if not model_path.exists():
+        raise FileNotFoundError(f"{model_path} 不存在（--resume 给不带后缀的路径即可）")
+    return model_path, find_replay_buffer(model_path)
 
 
 def load_resume_configs(model_path: pathlib.Path):
