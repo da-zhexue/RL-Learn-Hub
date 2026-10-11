@@ -22,7 +22,7 @@ import math
 import pathlib
 
 from go2_common.config import EnvCfg as Go2EnvCfg
-from go2_common.config import RewardCfg
+from go2_common.config import RewardCfg, obs_dim
 from go2_issac import course
 from go2_issac.mdp import actions as course_actions
 from go2_issac.mdp import commands, events, observations, rewards, state, terrain, terminations
@@ -59,7 +59,7 @@ GO2_USD = str(HERE / "assets" / "go2.usd")
 
 #: 参考环境配置（`go2_common/config.py`）。地形那两项在 `CourseEnvCfg.__post_init__` 里覆盖。
 _REF = Go2EnvCfg()
-#: 14 项奖励权重。**唯一来源**，两边共用（`mdp/rewards.py` 在运行期也从这里读）。
+#: 15 项奖励权重。**唯一来源**，两边共用（`mdp/rewards.py` 在运行期也从这里读）。
 _REW = RewardCfg()
 
 #: 地形几何参数来自 `course.py`（本机对着 MuJoCo 逐位对拍过）
@@ -202,7 +202,7 @@ class CourseActionsCfg:
 
 @configclass
 class CoursePolicyObsCfg(ObservationGroupCfg):
-    """`policy` 这一个组，里面只有 1 个 term——**一个 term 装下 45 维**（理由见 `mdp/observations.py`）。
+    """`policy` 这一个组，里面只有 1 个 term——**一个 term 装下 47 维**（理由见 `mdp/observations.py`）。
 
     Isaac Lab 的观测组是"**子类属性即 term**"：`ObservationManager` 遍历
     `group_cfg.__dict__` 收 term，再按名字跳过 `concatenate_terms`/`enable_corruption`
@@ -227,7 +227,7 @@ class CourseObservationsCfg:
 
 @configclass
 class CourseRewardsCfg:
-    """14 项，权重全部读 `RewardCfg`（`mdp/rewards.py` 里一项一行转调 `core.term_*`）。"""
+    """15 项，权重全部读 `RewardCfg`（`mdp/rewards.py` 里一项一行转调 `core.term_*`）。"""
 
     progress: RewardTermCfg = RewardTermCfg(
         func=rewards.reward_progress, weight=_REW.progress)
@@ -241,6 +241,8 @@ class CourseRewardsCfg:
         func=rewards.reward_base_height, weight=_REW.base_height)
     lateral: RewardTermCfg = RewardTermCfg(
         func=rewards.reward_lateral, weight=_REW.lateral)
+    lateral_vel: RewardTermCfg = RewardTermCfg(
+        func=rewards.reward_lateral_vel, weight=_REW.lateral_vel)
     orientation: RewardTermCfg = RewardTermCfg(
         func=rewards.reward_orientation, weight=_REW.orientation)
     yaw: RewardTermCfg = RewardTermCfg(
@@ -408,7 +410,7 @@ class CourseEnvCfg(ManagerBasedRLEnvCfg):
             f"-> 策略 {step_hz:.0f} Hz，回合 {self.episode_length_s:g}s = "
             f"{int(self.episode_length_s * step_hz)} 步\n"
             f"  action_scale {self.action_scale:g}，kp {_REF.kp:g} / "
-            f"kd {_REF.kd:g}(+0.1 铰链阻尼)，观测 {'46' if self.privileged else '45'} 维"
+            f"kd {_REF.kd:g}(+0.1 铰链阻尼)，观测 {obs_dim(self.privileged)} 维"
         )
 
 

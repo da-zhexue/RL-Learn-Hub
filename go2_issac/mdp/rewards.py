@@ -1,8 +1,8 @@
-"""14 项奖励，一项一个函数，全部转调 `core.term_*`。
+"""15 项奖励，一项一个函数，全部转调 `core.term_*`。
 
 **这里不写任何公式**：每项一行 `return core.term_xxx(...)`。Isaac 的奖励管理器做的是
 "权重 × 函数值，再求和"，`go2_common/reward.py` 的 `compute_reward` 做的也是同一件事，
-所以把这 14 个函数挂成 14 个 `RewardTermCfg` 之后，两边的分项天然一一对应：
+所以把这 15 个函数挂成 15 个 `RewardTermCfg` 之后，两边的分项天然一一对应：
 `Episode_Reward/<项名>` 和 TensorBoard 里 MuJoCo 侧记的是同一套名字、同一套权重。
 权重值写在 `env_cfg.py` 的 `RewardTermCfg.weight` 上，来源是 `RewardCfg` 的同名字段
 （`_weight()` 去读，不抄数字）。
@@ -17,7 +17,7 @@
 也一样，但和 MuJoCo 的 TensorBoard 对不上、值函数的尺度白变一次。乘 `1/dt` 抵掉之后，
 两边的**权重也保持同名同值**（`Episode_Reward/<项名>` 的曲线逐点相等）。
 
-`core.TERMS` 是项名和顺序的唯一真源，模块末尾会断言这 14 个函数和它对得上——
+`core.TERMS` 是项名和顺序的唯一真源，模块末尾会断言这 15 个函数和它对得上——
 漏一项、名字写错，导入时就炸，而不是等到训练时发现奖励少了一块。
 """
 from __future__ import annotations
@@ -92,9 +92,15 @@ def reward_base_height(env):
 
 @_per_step
 def reward_lateral(env):
-    """保持在 y=0 走廊里（惩罚项）。"""
+    """保持在 y=0 走廊里（惩罚项，**权重已置 0**，保留是为了老 config.json 与 POSTURE_TERMS 兼容）。"""
     cfg, st = _r(env)
     return core.term_lateral(st, cfg)
+
+
+def reward_lateral_vel(env):
+    """横向速度²，世界系（惩罚项）。理由与实测数字见 `RewardCfg.lateral_vel`。"""
+    cfg, st = _r(env)
+    return core.term_lateral_vel(st, cfg)
 
 
 # ------------------------------------------------------------------ 姿态
@@ -179,6 +185,7 @@ TERMS: dict[str, object] = {
     "level_bonus": reward_level_bonus,
     "base_height": reward_base_height,
     "lateral": reward_lateral,
+    "lateral_vel": reward_lateral_vel,
     "orientation": reward_orientation,
     "yaw": reward_yaw,
     "yaw_rate": reward_yaw_rate,

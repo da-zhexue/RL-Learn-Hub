@@ -46,6 +46,7 @@ from go2_common.config import (  # noqa: E402
     RUNS_DIR,
     EnvCfg,
     RewardCfg,
+    obs_dim,
     to_jsonable,
 )
 from go2_common.terrain import TERRAINS  # noqa: E402
@@ -201,7 +202,7 @@ def main(argv=None):
         )
     rollout_batch = train_cfg.n_steps * args.n_envs
     print(f"地形={env_cfg.terrain}(scale={env_cfg.terrain_scale:g})  action_scale={env_cfg.action_scale:g}  "
-          f"观测维度={45 + (1 if env_cfg.privileged else 0)}  "
+          f"观测维度={obs_dim(env_cfg.privileged)}  "
           f"环境数={args.n_envs}  总步数={args.steps:,}  输出目录={run_dir}")
     print(f"每轮 rollout：{train_cfg.n_steps} 步 × {args.n_envs} 环境 = {rollout_batch:,} 条样本，"
           f"{train_cfg.n_epochs} 个 epoch × {rollout_batch // train_cfg.batch_size} 个 minibatch")

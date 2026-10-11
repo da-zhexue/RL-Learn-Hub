@@ -3,8 +3,8 @@
 **进程内直接跑 MuJoCo，不走 DDS**：DDS 仿真被实时锁在 200 Hz 且只有单环境。
 训练地形就是 unitree_mujoco 自带的那份 scene.xml。
 
-观测是 45 维、全部能从 DDS 的 LowState 复现，所以 `play.py --mode dds`
-不用改任何东西就能把同一套策略发到仿真或真机上。
+观测是 47 维、全部能从 DDS 的 LowState 复现（含航向 sin/cos，取自 `imu_state.quaternion`），
+所以 `play.py --mode dds` 不用改任何东西就能把同一套策略发到仿真或真机上。
 """
 
 from __future__ import annotations
@@ -141,10 +141,15 @@ class Go2TerrainEnv(GymEnv):
         d = self.data
         quat = d.qpos[3:7]
         # d.qvel[3:6] 是**机体系**角速度（自由关节的线速度才是世界系），可以直接当陀螺用
+        yaw = float(quat_to_rpy(quat)[2])
         obs = np.concatenate(
             [
                 d.qvel[3:6] * OBS_GYRO_SCALE,
                 projected_gravity(quat),
+                # 航向（世界系/course 系 +x 为准）。projected_gravity 取不出 yaw，没有这两维
+                # 策略对"自己朝哪"完全失明。sin/cos 而不是裸 yaw：绕 ±π 不连续。
+                # 位置**必须**紧跟投影重力（下标 6:8），见 config.OBS_DIM 处的注释。
+                np.array([np.sin(yaw), np.cos(yaw)]),
                 np.array([self.cmd_vx, 0.0, 0.0]) * OBS_CMD_SCALE,
                 d.qpos[self.qadr] - self.q_default,
                 d.qvel[self.vadr] * OBS_DQ_SCALE,

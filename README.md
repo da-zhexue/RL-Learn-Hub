@@ -89,7 +89,8 @@ python3 ctrl_test.py
 ```
 
 ## GO2强化学习过地形（SAC）
-用SAC训练Go2走过「平地 → 几个槛 → 几级台阶」。
+用SAC训练Go2走过「平地 → 几个槛 → 几级台阶」。  
+SAC相比PPO在Issac Sim上没有很好的GPU专项优化，故本项使用Mujoco强化学习常使用Mujoco+Gymnasium+SB3的环境，[Gymnasium使用参考文档](https://gymnasium.org.cn/introduction/basic_usage/)。
 
 ### 地形
 `unitree_mujoco/unitree_robots/go2/scene.xml`
@@ -136,7 +137,7 @@ go2_ppo/*.py               同上，把算法换成 PPO
 | `--seed N` | `0` | 随机种子 |
 | `--save-dir DIR` | 见左 | 默认 `models/go2_sac_<地形>[_s<缩放>]_<时间戳>/`（PPO 则是 `go2_ppo_...`） |
 | `--resume PATH` | 无 | 接着训，`PATH` **不带后缀**（`models/xxx/best/best_model`、`.../checkpoints/rl_50000_steps`；写了 `.zip` 也认）；会读它同目录（找不到就往上一层找）的 `config.json`，并自动加载旁边的 replay buffer（同名 `.pkl`，或 CheckpointCallback 的 `*_replay_buffer_*_steps.pkl`）。路径写错会直接报错，不会静默从头训。PPO 只能续 PPO 自己的模型 |
-| `--privileged` | 关 | 观测里加 1 维机身离地高度（真机上没有，仅作对照）：45 维 → 46 维 |
+| `--privileged` | 关 | 观测里加 1 维机身离地高度（真机上没有，仅作对照）：47 维 → 48 维 |
 | `--reset-x LO HI` | `-0.3 0.3` | 起点 x 的随机范围，例如 `--reset-x 1.20 2.05` 直接练爬台阶 |
 | `--terrain-scale S` | `1.0` | 地形高度整体缩放（课程用）：`1.0`=原场景、`0`=平地。x/y 脚印不变，只压矮高度 |
 | `--action-scale A` | `0.6` | 关节目标幅度 `q_target = q_default + A·a`，决定能跨多高的槛。续训要么显式给、要么确认和上次一致 |
@@ -249,7 +250,8 @@ python3 -m go2_sac.play --mode viewer --model models/go2_sac_full_xxx/model.zip
 | yaw | `1−cos(yaw)` | −1.0 | 航向对准 |
 | orientation | `(1−cos roll)+(1−cos pitch)` | −0.5 | 机身保持水平 |
 | base_height | `max(0, \|z−h−0.27\| − 0.05)` | −0.3 | 站太低或太高 |
-| lateral | `y²` | −0.3 | 别跑偏出地形 |
+| lateral_vel | `vy_world²` | −5.0 | 别横漂（世界系，是下面 `lateral` 的时间导数；观测加了航向后这一项才可学） |
+| lateral | `y²` | **0** | **已废弃**：罚的是绝对位置 y，观测里没有 y，策略看不见 = 白交税（实测曾是最大支出 −0.510/步） |
 | yaw_rate | `ωz²` | −0.25 | 别原地打转 |
 | action_rate | `‖aₜ−aₜ₋₁‖²` | −0.05 | 动作别抖 |
 | collision | `max(0, 接触力−25N)` | −0.002 | 机身/大小腿撞地形，按力缩放、不终止 |

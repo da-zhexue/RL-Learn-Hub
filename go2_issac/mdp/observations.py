@@ -5,7 +5,7 @@
 clip ±10）**已经**在 `go2_common/config.py` 里定死、并被 `core.obs` 和 MuJoCo 侧共用。
 拆成 6 个 Isaac term 就得在 `env_cfg.py` 里再抄一遍这些数——两份配置漂移正是这次迁移要
 避免的事（`tests/core_parity.py` 对的是 `core.obs`，不是 Isaac 的 term 表）。
-所以这里保持"一段进、一段出"，让 45 维的语义只有一份实现。
+所以这里保持"一段进、一段出"，让 47 维的语义只有一份实现。
 
 **这一步还是"上一拍"唯一的维护点**（`_advance_prev`）。理由：`ManagerBasedRLEnv.step()`
 里观测是**最后**跑的（终止 -> 奖励 -> 重置 -> 命令 -> 观测），所以在这里推进
@@ -28,7 +28,7 @@ F64 = torch.float64
 
 
 def policy_obs(env) -> torch.Tensor:
-    """45 维（`--privileged` 时 46 维）观测，float32、clip ±10。"""
+    """47 维（`--privileged` 时 48 维）观测，float32、clip ±10。"""
     ctx = state._ctx(env)
     st = state.get_state(env)
     out = core.obs(st, ctx.cfg, ctx.q_default, privileged=ctx.cfg.privileged)

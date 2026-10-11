@@ -150,7 +150,7 @@ def resolve_model_path(path):
 def load_resume_configs(model_path: pathlib.Path):
     """从 checkpoint 同目录（或其上一层）的 config.json 还原 (EnvCfg, RewardCfg)。
 
-    否则很容易出现"用 45 维的配置去加载 46 维的模型"这种事。
+    否则很容易出现"用 47 维的配置去加载 48 维的模型"这种事。
     往上找一层是因为 CheckpointCallback 存到 `checkpoints/` 子目录里，而 config.json
     在运行目录的根上（`models/go2_sac_flat_xxx/config.json`）。
     """

@@ -51,6 +51,7 @@ from go2_common.config import (  # noqa: E402
     RUNS_DIR,
     EnvCfg,
     RewardCfg,
+    obs_dim,
     to_jsonable,
 )
 from go2_common.env import Go2TerrainEnv  # noqa: E402
@@ -76,8 +77,11 @@ _TROT_PHASE = np.repeat(np.array([0.0, np.pi, np.pi, 0.0]), 3)
 # 预热数据**重新标注奖励**：只保留任务项，这些姿态/能耗项一律置零。
 # `trot_action` 只驱动大腿和小腿、没有髋关节，必然自转横漂，原样计费会把预热数据
 # 变成负分（理由和实测数字见 AGENT.md §5-B6）。
+# `lateral_vel` 同理（2026-10-10 加）：手调小跑的 vy²=0.0462，按 −5.0 计是 −0.23/步，
+# 一条 1000 步的预热轨迹要倒扣 ~230 分，而任务项（progress+track）整条才 ~190 分——
+# 不置零就是把预热数据全变成负样本。
 POSTURE_TERMS = (
-    "base_height", "lateral", "orientation", "yaw", "yaw_rate",
+    "base_height", "lateral", "lateral_vel", "orientation", "yaw", "yaw_rate",
     "action_rate", "torques", "collision",
 )
 
@@ -276,7 +280,7 @@ def main(argv=None):
             f, indent=2, ensure_ascii=False,
         )
     print(f"地形={env_cfg.terrain}(scale={env_cfg.terrain_scale:g})  action_scale={env_cfg.action_scale:g}  "
-          f"观测维度={45 + (1 if env_cfg.privileged else 0)}  "
+          f"观测维度={obs_dim(env_cfg.privileged)}  "
           f"环境数={args.n_envs}  总步数={args.steps:,}  输出目录={run_dir}")
 
     # 每个 --save-dir 一个 tb 子目录（全写进 runs/ 会把不同 run 的曲线混成一条，见 AGENT.md §5-A5）

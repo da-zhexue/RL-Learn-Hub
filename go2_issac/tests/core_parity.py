@@ -5,7 +5,7 @@
 分两部分，各自管一件事：
 
 1. **合成状态**：直接造一大片"什么姿态都有"的状态（含顶平台、翻倒、出界，以及四条终止判据的
-   **边界值**），把观测 / 14 项奖励 / 终止判据的整个状态空间扫一遍。不依赖动力学，
+   **边界值**），把观测 / 15 项奖励 / 终止判据的整个状态空间扫一遍。不依赖动力学，
    所以能确定性地覆盖 success / fall / flip / out_of_course——靠 rollout 是撞不齐的。
 2. **真 rollout**：用开环小跑（会真的跨槛、上台阶）跑满回合，逐步比。这一段验证的是
    **状态量的映射**：陀螺是不是机体系、线速度是不是世界系、q/dq 是不是执行器顺序、
@@ -293,7 +293,7 @@ def check_synthetic(env, ct: core.CourseTerrain, tag: str, rng: np.random.Genera
 
     st = to_core_state(f, th, lv)
 
-    # --- 观测（45 维与 46 维各一遍）
+    # --- 观测（47 维与 48 维各一遍）
     for privileged in (False, True):
         env.cfg.privileged = privileged
         want = np.stack([_env_obs(env, f, i) for i in range(n)])

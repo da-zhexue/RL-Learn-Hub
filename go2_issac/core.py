@@ -1,6 +1,6 @@
 """观测 / 奖励 / 终止判据 / 命令：Isaac 侧的唯一实现，纯 torch，不 import isaaclab。
 
-逐条对照 `go2_common/env.py` 的 `_obs()` / `step()` 和 `go2_common/reward.py` 的 14 项。
+逐条对照 `go2_common/env.py` 的 `_obs()` / `step()` 和 `go2_common/reward.py` 的 15 项。
 奖励**权重**（`RewardCfg`）、观测缩放（`OBS_*`）、`action_scale`、`kp/kd`、
 成功/摔倒判据的阈值都从 `go2_common` 读，这里**不复制**任何常量——
 所以 go2_ppo 那边调完权重，Isaac 这边跟着变，不会出现两份配置漂移。
@@ -257,9 +257,9 @@ def default_joint_pos(cfg, joint_limits: torch.Tensor) -> torch.Tensor:
 
 
 def obs(st: State, cfg, q_default, privileged: bool = False) -> torch.Tensor:
-    """45 维观测（privileged 时 46 维），float32、clip ±10，逐项对照 `env.py:_obs()`。
+    """47 维观测（privileged 时 48 维），float32、clip ±10，逐项对照 `env.py:_obs()`。
 
-    组成： 角速度×0.25 | 投影重力 | 指令×2 | q-q_default | dq×0.05 | 上一步动作
+    组成： 角速度×0.25 | 投影重力 | 航向(sin,cos) | 指令×2 | q-q_default | dq×0.05 | 上一步动作
 
     `q_default` 可以是张量也可以是 numpy 数组（对拍时直接喂 `env.q_default`）。
 
@@ -273,6 +273,15 @@ def obs(st: State, cfg, q_default, privileged: bool = False) -> torch.Tensor:
     parts = [
         st.base_ang_vel.to(F64) * OBS_GYRO_SCALE,
         projected_gravity(st.base_quat.to(F64)),
+        # 航向（课程系 +x 为准），**必须紧跟投影重力**（下标 6:8），见 config.OBS_DIM 的注释。
+        # projected_gravity 取不出 yaw（重力向量绕竖直轴旋转不变），没有这两维策略对航向全失明。
+        torch.stack(
+            [
+                torch.sin(quat_to_rpy(st.base_quat.to(F64))[:, 2]),
+                torch.cos(quat_to_rpy(st.base_quat.to(F64))[:, 2]),
+            ],
+            dim=-1,
+        ),
         torch.tensor([1.0, 0.0, 0.0], dtype=F64, device=st.base_pos.device)
         * st.cmd_vx.to(F64).unsqueeze(-1) * OBS_CMD_SCALE,
         st.q.to(F64) - q_default.to(F64),
@@ -287,7 +296,7 @@ def obs(st: State, cfg, q_default, privileged: bool = False) -> torch.Tensor:
     return torch.clamp(out, -OBS_CLIP, OBS_CLIP).to(F32)
 
 
-# ------------------------------------------------------------------ 奖励（14 项）
+# ------------------------------------------------------------------ 奖励（15 项）
 #
 # 每项一个函数，返回**不带权重**的原始值；权重在 RewardCfg 里同名对应，由 compute_reward 求和。
 # 逐项对照 reward.py，包括那些看起来多余的 max(0, ...) —— 它们都是被实测逼出来的（见 README 奖励一节）。
@@ -335,7 +344,18 @@ def term_base_height(st: State, cfg: RewardCfg) -> torch.Tensor:
 
 
 def term_lateral(st: State, cfg: RewardCfg) -> torch.Tensor:
+    """绝对横向位置 y²（**权重已置 0**，保留函数体，理由见 term_lateral_vel）。"""
     return st.base_pos[:, 1] ** 2
+
+
+def term_lateral_vel(st: State, cfg: RewardCfg) -> torch.Tensor:
+    """横向速度的平方，**世界系**（`base_lin_vel` 就是世界系，见 `State` 的字段注释）。
+
+    和 `go2_common/reward.py:_lateral_vel` 逐位对齐。为什么是世界系不是机体系、
+    为什么它可学而 `term_lateral` 不可学：见 `RewardCfg.lateral_vel` 处的实测数字
+    （世界系 vy²=0.0462 vs 机体系 0.0022）。
+    """
+    return st.base_lin_vel[:, 1] ** 2
 
 
 def term_orientation(st: State, cfg: RewardCfg) -> torch.Tensor:
@@ -382,6 +402,7 @@ TERMS = (
     ("level_bonus", term_level_bonus),
     ("base_height", term_base_height),
     ("lateral", term_lateral),
+    ("lateral_vel", term_lateral_vel),
     ("orientation", term_orientation),
     ("yaw", term_yaw),
     ("yaw_rate", term_yaw_rate),

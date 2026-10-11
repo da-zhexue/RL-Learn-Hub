@@ -3,7 +3,7 @@
 **为什么要自己包一层**：`env.py:194` 一进门就把动作 clamp 到 ±1，**而且 clamp 之后的值
 才是后面观测和 `action_rate` 用的值**。Isaac Lab 的 `JointPositionAction` 默认不 clamp
 （靠 cfg 里的 `clip` 字段，而那个字段 1.x 没有），策略吐出来的高斯样本落在 ±1 之外时
-两边就不一样了——观测的第 45 维、`action_rate`、关节目标三处同时不同，还不会报错。
+两边就不一样了——观测里 prev_action 那 12 维、`action_rate`、关节目标三处同时不同，还不会报错。
 
 夹在 `process_actions` 里最省事：`super().process_actions` 会把参数原样存成
 `self._raw_actions`，所以夹完再交给它，`raw_actions`（观测和 `action_rate` 读的）

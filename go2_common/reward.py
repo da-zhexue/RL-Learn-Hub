@@ -113,8 +113,29 @@ def _base_height(r: RewardInput, cfg: RewardCfg) -> float:
 
 
 def _lateral(r: RewardInput, cfg: RewardCfg) -> float:
-    """别跑偏到地形外面去。"""
+    """别跑偏到地形外面去（**权重已置 0**，函数体保留，理由见下面 _lateral_vel 的注释）。
+
+    被否掉的原因：它罚的是绝对横向位置 y²，而观测里没有 y——策略看不见，学不会纠偏。
+    实测它是最大一笔支出（rl_800000 平地 6 局 −0.510/步，占每步支出的 60%）。
+    """
     return float(r.base_pos[1] ** 2)
+
+
+def _lateral_vel(r: RewardInput, cfg: RewardCfg) -> float:
+    """横向速度的平方，**世界系**（= 走廊坐标系里的 vy，正是上面 y² 的时间导数）。
+
+    为什么用世界系而不是机体系：实测手调开环小跑 10 局的方差——世界系 vy²=0.0462、
+    |vy|=0.186，机体系 vy²=0.0022，**差 21 倍**。也就是说这台狗的横漂几乎全是
+    "机头偏了、沿机身直走"造成的（yaw 一偏，−sin(yaw)·vx 就变成了世界系 vy），
+    不是真的侧滑；罚机体系等于罚了个寂寞（Isaac 的惯例是罚机体系，这里刻意不照抄）。
+
+    为什么可学：加了航向观测 (sin yaw, cos yaw) 之后，这一项的主项 −sin(yaw)·vx 是
+    策略可以自己算出来的量；改之前它和 `yaw` 一样属于"看不见但要交的税"。
+    注意它**不罚位置**：|y| 一旦偏出去，往回走同样要付 vy²，靠"回来"是赚不回来的。
+    位置性的约束仍由 progress 的走廊权重 w(y) 管（|y|≥1.25 归零，§5-B5），
+    那一条挂在"走"上，所以"站住不动攒位置"依然不是解（§5-B1）。
+    """
+    return float(r.base_v[1] ** 2)
 
 
 # ------------------------------------------------------------------ 姿态
@@ -179,6 +200,7 @@ TERMS = (
     ("level_bonus", _level_bonus),
     ("base_height", _base_height),
     ("lateral", _lateral),
+    ("lateral_vel", _lateral_vel),
     ("orientation", _orientation),
     ("yaw", _yaw),
     ("yaw_rate", _yaw_rate),

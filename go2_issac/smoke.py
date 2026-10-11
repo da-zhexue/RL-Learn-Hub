@@ -336,7 +336,7 @@ def check_sanity(env, args) -> None:
     st = state.get_state(env)
 
     # 1) 观测维度
-    #    `compute()` 返回的是**按组名分的 dict**（`{"policy": (N,45), ...}`），不是张量；
+    #    `compute()` 返回的是**按组名分的 dict**（`{"policy": (N,47), ...}`），不是张量；
     #    组名就是 `env_cfg.CourseObservationsCfg` 里那个属性名。少了 `["policy"]`，
     #    下面拿到的就是 dict，`.shape` 直接 AttributeError。
     obs = env.observation_manager.compute()["policy"]

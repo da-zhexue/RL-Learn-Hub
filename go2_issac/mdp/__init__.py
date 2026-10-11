@@ -3,8 +3,8 @@
 | 文件 | 挂到哪 | 里面是什么 |
 |---|---|---|
 | `state.py` | —— | 把 Isaac 的 articulation 数据折成 `core.State`（观测/奖励/终止唯一的取数口） |
-| `observations.py` | `ObservationsCfg` | 45 维观测（**只有一个 term**，理由见文件头）+ "上一拍"的维护点 |
-| `rewards.py` | `RewardsCfg` | 14 项奖励，一项一行转调 `core.term_*` |
+| `observations.py` | `ObservationsCfg` | 47 维观测（**只有一个 term**，理由见文件头）+ "上一拍"的维护点 |
+| `rewards.py` | `RewardsCfg` | 15 项奖励，一项一行转调 `core.term_*` |
 | `terminations.py` | `TerminationsCfg` | 成功/摔倒/翻转/出界，转调 `core.is_*` |
 | `events.py` | `EventCfg` | 重置出生点与关节初值（分布对齐 `env.py:reset()`） |
 | `commands.py` | `CommandsCfg` | 只有 vx、只在重置时采样的 `CommandTerm` |

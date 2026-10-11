@@ -10,8 +10,13 @@
     python3 -m go2_ppo.play --mode viewer --model models/go2_ppo_full_xxx/model.zip
     python3 -m go2_ppo.play --mode dds    --model models/go2_ppo_full_xxx/model.zip
 
-观测定义与训练时完全一致（45 维，全部能从 DDS 的 LowState 复现），
+观测定义与训练时完全一致（47 维，全部能从 DDS 的 LowState 复现），
 所以两种模式跑的是同一个策略、同一套输入。
+
+**航向那两维的真机语义**：yaw 取自 `imu_state.quaternion`，它的零点就是 IMU 初始化那一帧。
+仿真里"yaw=0"= 走廊 +x 方向，策略是在这个约定下学的——所以**上电前要把狗朝走廊方向摆正**，
+否则策略会以为自己是正的、一路斜着走。IMU 的 yaw 没有磁力计校正、长时会缓慢漂，
+但 20 s 的 episode 内可忽略。
 """
 
 from __future__ import annotations
@@ -119,10 +124,13 @@ def play_viewer(model, env_cfg, episodes, verbose=True):
 
 def build_obs_from_state(q, dq, quat, gyro, cmd_vx, prev_action, q_default):
     """按训练时的定义组观测。只有 q/dq/quat/gyro 四样，真机上一样能拿到。"""
+    yaw = float(quat_to_rpy(quat)[2])
     obs = np.concatenate(
         [
             np.asarray(gyro, dtype=np.float64) * OBS_GYRO_SCALE,
             projected_gravity(quat),
+            # 航向，**必须紧跟投影重力**（下标 6:8），顺序和 env.py:_obs() 逐位一致
+            np.array([np.sin(yaw), np.cos(yaw)], dtype=np.float64),
             np.array([cmd_vx, 0.0, 0.0]) * OBS_CMD_SCALE,
             np.asarray(q, dtype=np.float64) - q_default,
             np.asarray(dq, dtype=np.float64) * OBS_DQ_SCALE,

@@ -81,7 +81,7 @@ def _env_cfg_from_run(run_dir: pathlib.Path):
     cfg.action_scale = float(env_part.get("action_scale", cfg.action_scale))
     cfg.privileged = bool(env_part.get("privileged", cfg.privileged))
     print(f"  从 config.json 还原：地形 {cfg.terrain_variant}@{cfg.terrain_scale:g}，"
-          f"action_scale {cfg.action_scale:g}，观测 {'46' if cfg.privileged else '45'} 维")
+          f"action_scale {cfg.action_scale:g}，观测 {'48' if cfg.privileged else '47'} 维")
     return cfg
 
 
