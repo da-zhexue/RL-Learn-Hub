@@ -106,7 +106,7 @@ def collect_seed_transitions(env_cfg, reward_cfg, n_trot, n_rand, seed=0):
     env = Go2TerrainEnv(env_cfg, demo_cfg)
     control_hz = 1.0 / (env_cfg.sim_dt * env_cfg.decimation)
     rng = np.random.default_rng(seed)
-    obs_l, next_l, act_l, rew_l, done_l = [], [], [], [], []
+    obs_l, next_l, act_l, rew_l, done_l, timeout_l = [], [], [], [], [], []
     for ep in range(n_trot + n_rand):
         obs, _ = env.reset(seed=seed + ep)
         # 每条轨迹随机化频率/幅度/相位，别只喂一条确定性轨迹
@@ -128,31 +128,56 @@ def collect_seed_transitions(env_cfg, reward_cfg, n_trot, n_rand, seed=0):
             next_l.append(next_obs)
             act_l.append(a)
             rew_l.append(rew)
-            done_l.append(float(term))
+            done_l.append(float(term or trunc))
+            timeout_l.append(bool(trunc and not term))
             obs = next_obs
             if term or trunc:
                 break
     env.close()
     return (np.asarray(obs_l), np.asarray(next_l), np.asarray(act_l),
-            np.asarray(rew_l, dtype=np.float32), np.asarray(done_l, dtype=np.float32))
+            np.asarray(rew_l, dtype=np.float32), np.asarray(done_l, dtype=np.float32),
+            np.asarray(timeout_l, dtype=bool))
 
 
 def seed_replay_buffer(model, vec_env, env_cfg, reward_cfg, n_trot, n_rand, seed=0):
     """把预热数据填进 model 的 replay buffer，返回 (条数, 平均每步回报)。"""
-    obs, next_obs, act, rew, done = collect_seed_transitions(
+    obs, next_obs, act, rew, done, timeouts = collect_seed_transitions(
         env_cfg, reward_cfg, n_trot, n_rand, seed
     )
     n_envs = vec_env.num_envs
     n = (len(obs) // n_envs) * n_envs  # buffer 按 n_envs 分批存，截到整数倍
     rb = ReplayBuffer(
         model.buffer_size, vec_env.observation_space, vec_env.action_space,
-        device=model.device, n_envs=n_envs, handle_timeout_termination=False,
+        device=model.device, n_envs=n_envs, handle_timeout_termination=True,
     )
     for i in range(0, n, n_envs):
         sl = slice(i, i + n_envs)
-        rb.add(obs[sl], next_obs[sl], act[sl], rew[sl], done[sl], [{}] * n_envs)
+        infos = [{"TimeLimit.truncated": bool(timeout)} for timeout in timeouts[sl]]
+        rb.add(obs[sl], next_obs[sl], act[sl], rew[sl], done[sl], infos)
     model.replay_buffer = rb
     return n, float(rew.mean())
+
+
+def prepare_resume_buffer(model, replay_buffer_path, reset_buffer, learning_starts):
+    """Reject replay with lost timeout labels; never infer them from episode length."""
+    if replay_buffer_path is not None and not reset_buffer:
+        model.load_replay_buffer(str(replay_buffer_path))
+        if not model.replay_buffer.handle_timeout_termination:
+            raise ValueError(
+                f"{replay_buffer_path} 的超时标签已丢失，不能安全续用。"
+                "请加 --reset-replay-buffer 保留模型权重、清空旧数据并重新采集；"
+                "原 .pkl 文件不会被修改。"
+            )
+        print(f"  已从 {replay_buffer_path} 加载 replay buffer（超时处理已启用）")
+    else:
+        model.replay_buffer.reset()
+        model.replay_buffer.handle_timeout_termination = True
+        model.replay_buffer.timeouts.fill(0)
+        print("  replay buffer 从空开始，保留模型权重和优化器，重新采集数据")
+    if model.replay_buffer.size() == 0:
+        # SB3 compares learning_starts against cumulative num_timesteps on resume.
+        model.learning_starts = model.num_timesteps + learning_starts
+        print(f"  先采集 {learning_starts:,} 步，再开始梯度更新")
 
 
 def parse_args(argv=None):
@@ -171,6 +196,9 @@ def parse_args(argv=None):
     p.add_argument("--resume", default=None,
                    help="从已有的模型接着训，.zip 可省略；会读它同目录的 config.json（也会往上找一层，"
                         "所以 checkpoints/rl_xxx 这种路径直接给就行）")
+    p.add_argument("--reset-replay-buffer", action="store_true",
+                   help="续训时不加载旧 replay buffer，保留模型权重，先重新采集数据；"
+                        "超时标签已丢失的旧 buffer 必须使用此选项")
     p.add_argument("--privileged", action="store_true", default=None,
                    help="观测里加 1 维机身离地高度（真机上没有，仅作对照）")
     p.add_argument("--reset-x", type=float, nargs=2, default=None, metavar=("LO", "HI"),
@@ -206,6 +234,8 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.reset_replay_buffer and not args.resume:
+        raise ValueError("--reset-replay-buffer 只能与 --resume 一起使用")
     torch.set_num_threads(args.torch_threads)
 
     # 先确定环境：--resume 时以模型的 config.json 为准，命令行显式给的参数再覆盖它。
@@ -298,12 +328,13 @@ def main(argv=None):
 
     if resume_path is not None:
         model = SAC.load(str(resume_path), env=vec_env, device="cpu", tensorboard_log=str(tb_dir))
-        if replay_buffer_path is not None:
-            model.load_replay_buffer(str(replay_buffer_path))
-            print(f"  已从 {replay_buffer_path} 加载 replay buffer")
-        else:
-            print(f"  ! {resume_path} 旁边没找到 replay buffer（同名 .pkl 或 *_replay_buffer_*.pkl），"
-                  f"buffer 从空开始：续训会收敛慢甚至不收敛")
+        try:
+            prepare_resume_buffer(
+                model, replay_buffer_path, args.reset_replay_buffer, train_cfg.learning_starts
+            )
+        except Exception:
+            vec_env.close()
+            raise
         # 续训必须显式把超参再盖回去：SAC.load() 不传 kwargs，checkpoint 里存的超参
         changed = {}
         for name, want in (

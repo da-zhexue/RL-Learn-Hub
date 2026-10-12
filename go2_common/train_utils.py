@@ -56,16 +56,18 @@ class EvalMetricsCallback(BaseCallback):
             return True
         self.last_eval = self.num_timesteps
 
-        rewards, levels, max_xs, n_success = [], [], [], 0
+        rewards, levels, final_levels, max_xs, n_success = [], [], [], [], 0
         vxs, cmds = [], []
         vxs_all, cmds_all = [], []
         for i in range(self.n_episodes):
             # 记每个回合到过的最远 x：steps 阶段没有真台阶（只有两个 0.08 m 的槛），
             # 光看"最高台阶 0/0"和成功率看不出任何进展，x 才是那个阶段的进度条。
             best_x = [-np.inf]
+            best_level = [0]
 
             def on_step(e):
                 best_x[0] = max(best_x[0], float(e.data.qpos[0]))
+                best_level[0] = max(best_level[0], e.support_level())
                 vx_now, cmd_now = float(e.data.qvel[0]), float(e.cmd_vx)
                 vxs_all.append(vx_now)
                 cmds_all.append(cmd_now)
@@ -76,7 +78,9 @@ class EvalMetricsCallback(BaseCallback):
 
             total, info = run_episode(self.eval_env, self._act, seed=10_000 + i, on_step=on_step)
             rewards.append(total)
-            levels.append(info["level"])
+            # Include the reset pose, even if the first step immediately descends.
+            levels.append(max(best_level[0], info["max_level"]))
+            final_levels.append(info["level"])
             max_xs.append(best_x[0])
             n_success += int(info["success"])
 
@@ -92,6 +96,8 @@ class EvalMetricsCallback(BaseCallback):
         self.logger.record("eval/success_rate", n_success / self.n_episodes)
         self.logger.record("eval/mean_level", float(np.mean(levels)))
         self.logger.record("eval/max_level", float(np.max(levels)))
+        self.logger.record("eval/mean_final_level", float(np.mean(final_levels)))
+        self.logger.record("eval/max_final_level", float(np.max(final_levels)))
         self.logger.record("eval/mean_max_x", float(np.mean(max_xs)))
         self.logger.record("eval/mean_vx", mean_vx)
         self.logger.record("eval/vx_ratio", vx_ratio)

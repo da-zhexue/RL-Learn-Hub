@@ -60,6 +60,9 @@ def reset_joints(env, env_ids=None, **kwargs) -> None:
     q = ctx.q_default.to(torch.float32).expand(n, -1).clone()
     dq = torch.zeros(n, 12, dtype=torch.float32, device=env.device)
     robot.write_joint_state_to_sim(q, dq, joint_ids=ctx.joint_ids, env_ids=env_ids)
+    # The post-reset observation initializes the new episode's support level.
+    if hasattr(env, "_course_prev"):
+        env._course_prev["prev_terrain_level"][env_ids] = 0
 
 
 def _rng(env) -> torch.Generator:

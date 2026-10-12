@@ -213,7 +213,7 @@ class State:
     prev_x: torch.Tensor        # (N,)
     prev_action: torch.Tensor   # (N,12)
     prev_terrain_h: torch.Tensor
-    prev_terrain_level: torch.Tensor
+    prev_terrain_level: torch.Tensor  # (N,) Episode maximum before this step.
 
     # --- 命令
     cmd_vx: torch.Tensor        # (N,) 本回合的前进速度指令（整回合不变）
@@ -235,7 +235,7 @@ def advance(st: State) -> dict:
         "prev_action": st.action,
         "prev_x": st.base_pos[:, 0],
         "prev_terrain_h": st.terrain_h,
-        "prev_terrain_level": st.terrain_level,
+        "prev_terrain_level": torch.maximum(st.prev_terrain_level, st.terrain_level),
     }
 
 

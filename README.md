@@ -154,6 +154,7 @@ go2_ppo/*.py               同上，把算法换成 PPO
 | `--target-entropy H` | `-6.0` | 目标熵。SB3 默认 `-12` 对 12 维动作过强，会把探索压没（见 AGENT.md §6.4） |
 | `--gradient-steps G` | `-1` | 每收集一轮（= `train_freq × n_envs` = 8 个环境步）做几次梯度更新。`-1` = 标准的 UTD=1（见 AGENT.md §5-A4） |
 | `--seed-trot N` | 看情况 | 用 N 条开环小跑轨迹预热 replay buffer；`0` = 关闭。从头训练默认开（30 条），续训默认关——预热喂的手调小跑比已经会走路的策略差得多（见下面[预热](#预热)一节） |
+| `--reset-replay-buffer` | 关 | 仅续训：保留模型权重与优化器，不加载旧 buffer；先重新采集 10,000 步再更新。超时标签已丢失的旧 buffer 会报错，必须加此选项；原 `.pkl` 不修改 |
 
 **PPO 专属**
 | 参数 | 默认 | 说明 |
@@ -165,6 +166,10 @@ go2_ppo/*.py               同上，把算法换成 PPO
 | `--target-kl KL` | `0.02` | 早停阀：单次更新的 `approx_kl` 超过 1.5×它，本轮剩下的 epoch 全停 |
 
 加了 `--resume` 之后，环境侧的`terrain / scene / reset_x / terrain_scale / action_scale / privileged` 和奖励权重会先整个从 checkpoint 同目录的 `config.json` 里恢复，命令行显式给了才覆盖（`--fresh-reward` 则把奖励权重换回当前默认值）；`--steps` 也从「总量」变成「本级再练多少」。
+
+2026-10-12 修复了 SAC 预热 buffer 的超时处理。修复前关闭超时处理的 `.pkl` 已丢失标签，
+不能只改开关继续用；从这些 checkpoint 续训须加 `--reset-replay-buffer`，建议输出到新的
+`--save-dir`。模型权重可继续加载，但旧 buffer 的历史奖励不会自动按新规则重标。
 
 #### 预热
 写死一个开环小跑的动作并录制数据进行训练，防止陷入卡住不动的局部最优解，让狗学会跑起来分可以更高。  
@@ -224,6 +229,10 @@ python3 -m go2_sac.train --terrain full --terrain-scale 1.00 --action-scale 0.7 
 tensorboard --logdir /path/to/unitree/runs
 ```
 
+`eval/mean_level` / `eval/max_level` 从 2026-10-12 起统计回合轨迹最高级（包括出生级数），
+结束时的级数另记在 `eval/mean_final_level` / `eval/max_final_level`。旧日志不会自动修正。
+成功仍按原到顶判据判断；`best_model` 仍按平均回报选择，本次未更改选模标准。
+
 ### 回放
 ```
 python3 -m go2_sac.play --mode viewer --model models/go2_sac_full_xxx/model.zip
@@ -239,7 +248,7 @@ python3 -m go2_sac.play --mode viewer --model models/go2_sac_full_xxx/model.zip
 | --- | --- | --- | --- |
 | progress | `Δx · w(y)`，走廊内的 x 势能增量 | +100 /米 | 主收入，走完全程约 +190 |
 | climb | `Δ地形高度`（不是 Δ机身高度） | +100 /米 | 爬高，爬完六级 +57 |
-| level_bonus | 登上新一级台阶 = 1，只涨不跌 | +5 | 离散里程碑，比连续势能好认 |
+| level_bonus | 超过本回合此前最高级的新增级数 | +5 | 出生级数不发奖，退下来再上同一级不重复发放 |
 | track_lin_vel | `max(0, e^{-(vx-cmd)²/σ²} − e^{-cmd²/σ²})` | +1.0 | 步态质量（金额很小） |
 | success | 站上顶平台 = 1（终止） | +20 | |
 

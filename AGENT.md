@@ -1,102 +1,109 @@
 # AGENT.md
 
-> **这个文件和 README.md 的分工**：README 给人看，只写结论和怎么跑，简略。
-> 本文件写**为什么**、**踩过什么雷**、**哪些数字是量出来的**、**什么不能碰**。
-> 改本仓库前先读完本文件；写代码时以本文件为准。
+> **How this file differs from README.md**: README is a concise, human-facing
+> guide to conclusions and how to run the project. This file records **why**,
+> **past pitfalls**, **which numbers were measured**, and **what must not change**.
+> Read this entire file before modifying the repository; follow it when writing code.
 >
-> 维护约定：**踩到新雷就往对应分类里加一条**（现象 / 根因 / 修法 / 实测数字）。
-> 加条目比加代码重要——这个仓库的绝大部分损失来自"静默失效"，不是来自写不出的算法。
+> Maintenance rule: **add every newly discovered pitfall to the appropriate category**
+> (symptom / root cause / fix / measured results). Recording these findings matters
+> more than adding code: most losses in this repository have come from silent
+> failures, not from an inability to implement algorithms.
 
 ---
 
-## 1. 仓库结构
+## 1. Repository Structure
 
-```
+```text
 /home/lin/unitree/
-├── go2_common/           ← 算法无关的共享层，SAC / PPO 共用同一份（**只有这一份**）
-│   ├── config.py         常量、EnvCfg/RewardCfg、quat_to_rpy/projected_gravity（不 import mujoco）
-│   ├── terrain.py        课程变体构造(build_model)、地形高度查询(TerrainHeight)、判据
-│   ├── env.py            Go2TerrainEnv（Gymnasium）+ run_episode
-│   ├── reward.py         奖励：每项一个函数 + compute_reward() -> (total, parts)
+├── go2_common/           Algorithm-independent shared layer for SAC / PPO (ONE implementation)
+│   ├── config.py         Constants, EnvCfg/RewardCfg, quat_to_rpy/projected_gravity (no mujoco import)
+│   ├── terrain.py        Curriculum variants (build_model), terrain heights (TerrainHeight), criteria
+│   ├── env.py            Go2TerrainEnv (Gymnasium) + run_episode
+│   ├── reward.py         One function per reward term + compute_reward() -> (total, parts)
 │   └── train_utils.py    make_env / EvalMetricsCallback / load_resume_configs / resolve_model_path
-├── go2_sac/              ← 只有 SAC 专属的东西
-│   ├── config.py         SAC 的 TrainCfg
-│   ├── train.py          SAC 训练入口（含 diag 用的 trot_action、演示数据预热）
-│   ├── play.py           回放/部署（--mode viewer / dds）
-│   └── diag.py           诊断子命令：terrain/stance/lift/frontier/policy/why/reward
-├── go2_ppo/              ← 同上，算法换成 PPO；无预热，其余与 go2_sac 一一对应
-│   ├── config.py         PPO 的 TrainCfg
-│   ├── train.py          PPO 训练入口
-│   ├── play.py           回放/部署
-│   └── diag.py           薄壳：把 go2_sac.diag.load_policy 换成 PPO.load 后转发（实现只有一份）
-├── go2_issac/            ← 同一任务迁到 Isaac Sim（算法换 rsl_rl，资产自己转 USD）
-│   ├── course.py         地形几何唯一真源，纯 numpy（**不 import mujoco / isaaclab**）
-│   ├── core.py           观测 / 14 项奖励 / 终止判据，纯 torch（同上）
-│   ├── tests/            本机可跑的逐位对拍：course_parity / core_parity
-│   ├── assets/           从编译后的 MjModel 导出的资产真值与静置真值（本机跑，产物进 git）
-│   ├── convert_assets.py MJCF -> USD（**只能上机**）
-│   ├── env_cfg.py mdp/ agents/ train.py play.py smoke.py   （**只能上机**）
-│   └── RUNBOOK.md        上机手册：装机、转换、自检、训练
-├── ctrl/                 ← 本仓库自己的代码
-│   ├── go2_ctrl.py       Go2Ctrl：DDS 收发 + 500 Hz 独立线程 + 插值平滑 + reset
-│   └── ctrl_test.py      DDS 手动测试
-├── run_curriculum.sh     地形课程（平地 → 两个槛），A=0.6，逐级放开高度
-├── run_stairs.sh         楼梯阶段，A=0.7，0.56→1.00 七级
-├── README.md             给人看的简略说明
-├── AGENT.md              本文件
-├── models/               训练输出（**已 gitignore**，几十 GB）
-├── runs/                 TensorBoard（**已 gitignore**）
-├── logs/                 nohup 日志（**已 gitignore**）
-├── unitree_mujoco/       上游克隆，**不要改**
-├── unitree_sdk2_python/  上游克隆，**不要改**
-└── unitree_ros2/         上游克隆，**不要改**
+├── go2_sac/              SAC-specific functionality only
+│   ├── config.py         SAC TrainCfg
+│   ├── train.py          SAC training entry point (trot_action for diagnostics, demonstration seeding)
+│   ├── play.py           Playback/deployment (--mode viewer / dds)
+│   └── diag.py           Diagnostic subcommands: terrain/stance/lift/frontier/policy/why/reward
+├── go2_ppo/              PPO equivalent; no seeding, otherwise matches go2_sac
+│   ├── config.py         PPO TrainCfg
+│   ├── train.py          PPO training entry point
+│   ├── play.py           Playback/deployment
+│   └── diag.py           Thin wrapper: replace go2_sac.diag.load_policy with PPO.load, then delegate
+├── go2_issac/            Same task ported to Isaac Sim (rsl_rl, self-converted USD assets)
+│   ├── course.py         Single source of terrain geometry, pure numpy (no mujoco / isaaclab imports)
+│   ├── core.py           Observations / 14 reward terms / termination criteria, pure torch (same restriction)
+│   ├── tests/            Local element-by-element parity checks: course_parity / core_parity
+│   ├── assets/           Asset and resting-state reference data from compiled MjModel (generated locally, committed)
+│   ├── convert_assets.py MJCF -> USD (TARGET MACHINE ONLY)
+│   ├── env_cfg.py mdp/ agents/ train.py play.py smoke.py   (TARGET MACHINE ONLY)
+│   └── RUNBOOK.md        Target-machine guide: installation, conversion, checks, training
+├── ctrl/                 Code maintained by this repository
+│   ├── go2_ctrl.py       Go2Ctrl: DDS I/O + independent 500 Hz thread + interpolation/smoothing + reset
+│   └── ctrl_test.py      Manual DDS tests
+├── run_curriculum.sh     Terrain curriculum (flat -> two low obstacles), A=0.6, increasing heights
+├── run_stairs.sh         Stair stage, A=0.7, seven scales from 0.56 to 1.00
+├── README.md             Concise human-facing guide
+├── AGENT.md              This file
+├── models/               Training outputs (gitignored, tens of GB)
+├── runs/                 TensorBoard (gitignored)
+├── logs/                 nohup logs (gitignored)
+├── unitree_mujoco/       Upstream clone: DO NOT MODIFY
+├── unitree_sdk2_python/  Upstream clone: DO NOT MODIFY
+└── unitree_ros2/         Upstream clone: DO NOT MODIFY
 ```
 
-**上游三个目录一律不改**。要改仿真行为只能通过：
-`go2_common/terrain.py` 的 `MjSpec` 运行时改写（删/缩放几何体）、`go2_common/env.py` 的步进逻辑、
-`go2_common/config.py` 的参数。奖励/环境**只改 `go2_common/` 里那一份**，两个算法包都跟着变——
-不要往 `go2_sac/` 或 `go2_ppo/` 里再抄一份环境或奖励。
-**用户的 `scene.xml` 不能改**——地形课程是运行时用 `MjSpec` 编译出来的变体，不落盘。
+**Never modify any of the three upstream directories.** Changes to simulation
+behavior must go through runtime `MjSpec` modifications in `go2_common/terrain.py`
+(remove/scale geometry), the stepping logic in `go2_common/env.py`, or parameters
+in `go2_common/config.py`. **Modify rewards and environments only in the shared
+`go2_common/` implementation**, so both algorithm packages inherit the changes.
+Do not copy environments or rewards into `go2_sac/` or `go2_ppo/`.
+**Do not modify the user's `scene.xml`.** Curriculum terrain variants are compiled
+at runtime with `MjSpec` and are not written to disk.
 
 ---
 
-## 2. 运行方式
+## 2. Running the Project
 
-环境：conda env **`sim`**（Python 3.10.12）。CPU only，16 核。无 GPU。
+Environment: conda environment **`sim`** (Python 3.10.12). CPU only, 16 cores, no GPU.
 
-两种调用方式都支持，`train.py` / `play.py` 顶部有 `if __package__ in (None, ""): sys.path.insert(...)` 兜底：
+Both invocation styles are supported. At the top of `train.py` / `play.py`,
+`if __package__ in (None, ""): sys.path.insert(...)` provides the fallback:
 
 ```bash
-python3 -m go2_sac.train ...     # 仓根，推荐
-python3 go2_sac/train.py ...     # 也可以
+python3 -m go2_sac.train ...     # From the repository root; recommended
+python3 go2_sac/train.py ...     # Also supported
 ```
 
-常用命令：
+Common commands:
 
 ```bash
-# 从头训练（会自动用开环小跑预热 replay buffer）
+# Train from scratch (automatically seed the replay buffer with an open-loop trot)
 python3 -m go2_sac.train --terrain full --terrain-scale 0.35 --action-scale 1.0 \
     --steps 2000000 --gradient-steps 1 --eval-freq 50000 --eval-episodes 20 \
     --checkpoint-freq 100000 --save-dir models/amp1_s035
 
-# 课程 / 楼梯
+# Curriculum / stairs
 ./run_curriculum.sh models/go2_sac_flat_xxx/checkpoints/rl_800000_steps.zip
 ./run_stairs.sh models/st_s056_full/best/best_model.zip
 
-# 回放
+# Playback
 python3 -m go2_sac.play --mode viewer --model models/xxx/best/best_model.zip
-python3 -m go2_sac.play --mode dds --model models/xxx/model.zip   # 另开 unitree_mujoco.py
+python3 -m go2_sac.play --mode dds --model models/xxx/model.zip   # Start unitree_mujoco.py separately
 ```
 
 ```bash
-# PPO：同样的课程、同样的参数名，只是换个模块
+# PPO: same curriculum and argument names, a different module
 python3 -m go2_ppo.train --terrain flat --steps 200000 --checkpoint-freq 40000
 python3 -m go2_ppo.play  --mode viewer --model models/go2_ppo_flat_xxx/model.zip
 ```
 
 ```bash
-# Isaac Sim：同一套任务，算法换 rsl_rl、资产自己转。**这几条只能在有 NVIDIA 显卡的机器上跑**
-python3 -m go2_issac.tests.course_parity     # ← 这两条本机就能跑（对拍）
+# Isaac Sim: same task, rsl_rl, self-converted assets. Runtime commands require an NVIDIA GPU.
+python3 -m go2_issac.tests.course_parity     # These two parity checks also run locally
 python3 -m go2_issac.tests.core_parity
 python3 go2_issac/convert_assets.py
 python3 go2_issac/smoke.py --all --num-envs 4
@@ -104,489 +111,757 @@ python3 go2_issac/train.py --terrain flat --steps 200_000 --num-envs 512 --visua
 python3 go2_issac/play.py --resume models/go2_issac_flat_xxx
 ```
 
-`go2_issac/train.py` 的 CLI 比上面两个**少得多**：`--terrain --terrain-scale --action-scale
---steps --num-envs --seed --save-dir --resume --privileged --mini-batches --max-iterations`。
-PPO 超参一律不进 CLI，全在 `agents/rsl_rl_ppo_cfg.py`——那里只有一份默认值，
-不会和 `go2_ppo/config.py` 漂移。上机步骤见 `go2_issac/RUNBOOK.md`。
+The CLI for `go2_issac/train.py` is **much smaller** than those of the other two:
+`--terrain --terrain-scale --action-scale --steps --num-envs --seed --save-dir
+--resume --privileged --mini-batches --max-iterations`.
+PPO hyperparameters are not exposed through that CLI; they all live in
+`agents/rsl_rl_ppo_cfg.py`, with a single set of defaults that does not drift
+against `go2_ppo/config.py`. See `go2_issac/RUNBOOK.md` for target-machine setup.
 
-`go2_sac.train` 的 CLI：`--terrain --scene --steps --n-envs --seed --save-dir --resume --privileged
---reset-x LO HI --terrain-scale --action-scale --learning-rate --target-entropy --gradient-steps
---fresh-reward --eval-freq --eval-episodes --checkpoint-freq --torch-threads --seed-trot`。
+CLI for `go2_sac.train`:
+`--terrain --scene --steps --n-envs --seed --save-dir --resume --privileged
+--reset-x LO HI --terrain-scale --action-scale --learning-rate --target-entropy
+--gradient-steps --fresh-reward --eval-freq --eval-episodes --checkpoint-freq
+--torch-threads --seed-trot`.
 
-`go2_ppo.train` 的 CLI = 上面**去掉** `--target-entropy --gradient-steps --seed-trot`
-（PPO 没有目标熵、没有 UTD 这个旋钮、没有 replay buffer 可预热），**加上**
-`--n-steps --batch-size --n-epochs --ent-coef --target-kl`。其余参数的语义逐字相同，
-包括"`--steps` 续训是本阶段再练多少步""换阶段必须 `--fresh-reward`"。
+CLI for `go2_ppo.train`: **remove** `--target-entropy --gradient-steps --seed-trot`
+from the above (PPO has no target entropy, no UTD control, and no replay buffer to
+seed), and **add** `--n-steps --batch-size --n-epochs --ent-coef --target-kl`.
+All other arguments have exactly the same semantics, including "on resume,
+`--steps` means additional steps for this stage" and "changing stages requires
+`--fresh-reward`."
 
-**吞吐基线（SAC）**（8 环境、CPU）：
-- `gradient_steps=1` → **约 440 环境步/秒**（一次更新约 18 ms，8 步一更新）
-- `gradient_steps=2` → 约 220 步/秒；`-1`（UTD=1）→ **约 55 步/秒**
-- 据此估时间：2M 步 @ `gradient_steps=1` ≈ 75 分钟。
+**SAC throughput baseline** (8 environments, CPU):
+- `gradient_steps=1`: **about 440 environment steps/s** (about 18 ms per update,
+  one update every 8 steps).
+- `gradient_steps=2`: about 220 steps/s; `-1` (UTD=1): **about 55 steps/s**.
+- Estimated duration: 2M steps at `gradient_steps=1` takes about 75 minutes.
 
-**PPO 的吞吐还没正经测**（只跑过 512/1024 步的验证跑，秒级、被启动开销主导），
-估时间以运行时打印的 `time/fps` 为准，不要拿上面 SAC 的数字套。
-
----
-
-## 3. 代码规范（改代码必须遵守）
-
-1. **`config.py` 不 import mujoco**。它只依赖 numpy——`play.py` 要读 `config.json`、
-   `reward.py` 要能脱离仿真单独自检，都不该被迫建模型。
-2. **奖励项名 = `reward.py` 里的函数名 = `RewardCfg` 里的字段名**，一一对应，靠
-   `TERMS = (("progress", _progress), ...)` 和 `getattr(cfg, name)` 绑定。
-   **加/改奖励只动 `RewardCfg` 的权重，不改函数体**；要加新项就在 `reward.py` 里加函数
-   并在 `TERMS` 里登记，同时在 `RewardCfg` 加同名字段。
-3. **加新奖励项前先过"能不能被刷分"这一关**。仓库里被否掉的例子：
-   - `feet_air_time`：不加速度指令闸门时是"原地踏步"和"冲下悬崖"的经典刷分点；
-   - 用 `Δbase_z` 当爬升：抬屁股/弹跳就能刷，所以用 `Δterrain_h`；
-   - `exp(-err²)` 形式的 `base_height`：站对了发满额奖励 = 发保底工资，零动作站着就能白拿。
-4. **注释写"为什么"，并且带上实测数字**。这个仓库的注释密度是刻意高的——每条结论都要能追溯到
-   一次测量。不要写"这里做了 X"这种复述代码的注释。
-5. **失败了也要把失败写进注释**。被证伪的假设（比如"critic 塌了导致策略崩"）写清楚是怎么被证伪的，
-   否则下一个人（或下一轮的你）会重新踩一遍。
-6. **不新增第三方依赖**。可用的只有：mujoco 3.10.0、stable-baselines3 2.9.0、gymnasium、
-   torch、numpy 1.26.4。训练必须在 CPU 上跑得动。
-7. **不要为了"让 demo 好看"放宽成功判据**。成功 = 站上 0.92 m 顶平台；汇报进度用
-   "最高到过第几级台阶"这个副指标，不降标准。
+**PPO throughput has not been properly measured.** Only 512/1024-step validation
+runs have been performed; they take seconds and are dominated by startup overhead.
+Use the runtime `time/fps` output to estimate duration. Do not reuse SAC's numbers.
 
 ---
 
-## 4. 硬不变量（改了就崩，且往往不报错）
+## 3. Coding Rules (Mandatory for Code Changes)
 
-| # | 不变量 | 违反的后果 |
+1. **`config.py` must not import mujoco.** It depends only on numpy. `play.py`
+   needs to read `config.json`, and `reward.py` must support standalone checks
+   without simulation; neither should be forced to construct a model.
+2. **Reward term name = function name in `reward.py` = field name in `RewardCfg`.**
+   Maintain the one-to-one mapping through `TERMS = (("progress", _progress), ...)`
+   and `getattr(cfg, name)`. **When adding/changing rewards, change weights in
+   `RewardCfg`, not existing function bodies.** For a new term, add a function in
+   `reward.py`, register it in `TERMS`, and add the same-named field in `RewardCfg`.
+3. **Before adding a reward term, check whether it can be exploited.** Rejected
+   examples in this repository:
+   - `feet_air_time`: without a velocity-command gate, stepping in place and
+     running off a cliff are classic reward exploits.
+   - `Δbase_z` as a climbing signal: raising the hindquarters or bouncing can
+     exploit it, so use `Δterrain_h` instead.
+   - `base_height` in the form `exp(-err²)`: paying the full reward for the correct
+     standing height creates guaranteed income for standing still with zero action.
+4. **Comments must explain why and include measured numbers.** The high comment
+   density is deliberate: every conclusion must be traceable to a measurement.
+   Do not write comments that merely restate "this code does X."
+5. **Document failed attempts too.** Explain how hypotheses such as "critic
+   collapse caused policy collapse" were falsified; otherwise the next person,
+   or your next session, will repeat them.
+6. **Do not add third-party dependencies.** Available dependencies are mujoco
+   3.10.0, stable-baselines3 2.9.0, gymnasium, torch, and numpy 1.26.4. Training
+   must remain runnable on CPU.
+7. **Do not relax success criteria to make a demo look better.** Success means
+   reaching the 0.92 m top platform. Report the highest stair level reached as a
+   secondary progress metric, without lowering the completion standard.
+
+---
+
+## 4. Hard Invariants (Violations Often Fail Silently)
+
+| # | Invariant | Consequence of violating it |
 |---|---|---|
-| 1 | **关节顺序**：`qpos` 按身体树是 FL,FR,RL,RR；执行器 / DDS `LowCmd`/`LowState` / `go2.xml` 的 sensor 是 FR,FL,RR,RL | PD 反馈接到错误关节，狗一上电就瘫倒 |
-| 2 | 必须用 `m.actuator_trnid[:,0]` + `m.jnt_qposadr` / `m.jnt_dofadr` 建地址表（`env.qadr` / `env.vadr`） | 硬编码 `qpos[7:19]` 必错。实测映射 = `[10,11,12, 7,8,9, 16,17,18, 13,14,15]` |
-| 3 | 观测 47 维 = 角速度3×0.25 + 投影重力3 + **航向(sin,cos)2** + 指令3×2 + (q−q_default)12 + dq12×0.05 + 上一步动作12，最后 clip ±10。航向块**必须在投影重力之后**（下标 6:8，2026-10-10 加，理由见 §5-B7） | 维度和顺序变了，旧模型全部失效（`config.json` 会存布局，但 `play.py` 不校验）。插在别处会踩到 `smoke.py` 按 `obs[0,3:6]` 切投影重力那一刀 |
-| 4 | **观测的每一维都必须能从 DDS `LowState` 复现**。代码里不读 `rpy`、`base 高度`、`foot_force` | `--mode dds` 和 viewer 跑的不是同一个策略，真机部署直接失效。DDS 桥里 `rpy`/`foot_force` 恒为 0 |
-| 5 | 时序：`SIM_DT=0.005`（= `simulate_python/config.py` 的 `SIMULATE_DT`）、`DECIMATION=4` → 策略 50 Hz | 改成别的值会让 sim-to-sim 差距变大；`play.py --mode dds` 的 50 Hz 组帧也要跟着改 |
-| 6 | PD：每物理子步 `tau = kp*(q_target − q) − kd*dq`，逐执行器 clip 到 `ctrlrange`，kp=60 / kd=3.5 | **kd ≥ 4.5 会激发高频振荡**（实测 `|dq|` 冲到 40 rad/s，狗原地抖动并后退） |
-| 7 | 默认站姿 `DEFAULT_Q = [0, 0.9, −1.8] * 4`（FR,FL,RR,RL 顺序），取自 `go2.xml` 的 `home` 关键帧 | 顺序错了就是第 1 条的后果 |
-| 8 | 超时用 `truncated` 而不是 `terminated` | SB3 才会正确做 bootstrap；用 `terminated` 会让 Q 在超时处被截断 |
+| 1 | **Joint order**: `qpos` follows the body tree, FL,FR,RL,RR; actuators / DDS `LowCmd`/`LowState` / sensors in `go2.xml` use FR,FL,RR,RL. | PD feedback is connected to the wrong joints; the robot collapses as soon as it is powered. |
+| 2 | Build address maps (`env.qadr` / `env.vadr`) from `m.actuator_trnid[:,0]` + `m.jnt_qposadr` / `m.jnt_dofadr`. | Hardcoding `qpos[7:19]` is wrong. Measured mapping: `[10,11,12, 7,8,9, 16,17,18, 13,14,15]`. |
+| 3 | 47-dimensional observation = angular velocity 3×0.25 + projected gravity 3 + **heading (sin,cos) 2** + command 3×2 + (q−q_default) 12 + dq 12×0.05 + previous action 12; clip to ±10. The heading block **must follow projected gravity** (indices 6:8; added 2026-10-10; see §5-B7). | Changing dimensions or ordering invalidates all old models (`config.json` stores the layout, but `play.py` does not validate it). Inserting heading elsewhere breaks the projected-gravity slice `obs[0,3:6]` in `smoke.py`. |
+| 4 | **Every observation dimension must be reproducible from DDS `LowState`.** Do not read `rpy`, base height, or `foot_force` in the observation code. | `--mode dds` and viewer would run different policies, invalidating deployment on the real robot. The DDS bridge always reports 0 for `rpy`/`foot_force`. |
+| 5 | Timing: `SIM_DT=0.005` (= `SIMULATE_DT` in `simulate_python/config.py`), `DECIMATION=4`, giving a 50 Hz policy. | Other values increase the sim-to-sim gap; the 50 Hz frame assembly in `play.py --mode dds` must change accordingly. |
+| 6 | PD at every physics substep: `tau = kp*(q_target − q) − kd*dq`, clipped per actuator to `ctrlrange`; kp=60 / kd=3.5. | **kd ≥ 4.5 excites high-frequency oscillation** (measured `|dq|` reaches 40 rad/s; the robot shakes in place and moves backward). |
+| 7 | Default stance: `DEFAULT_Q = [0, 0.9, −1.8] * 4`, in FR,FL,RR,RL order, from the `home` keyframe in `go2.xml`. | Incorrect ordering causes the same failure as invariant 1. |
+| 8 | Timeouts must use `truncated`, not `terminated`. | SB3 can then bootstrap correctly; `terminated` cuts off Q at timeout boundaries. |
 
 ---
 
-## 5. 踩过的雷
+## 5. Past Pitfalls
 
-### A. 静默失效类（最危险：不报错、看起来生效、实际没生效）
+### A. Silent Failures (Most Dangerous: No Error, Apparent Success, No Actual Effect)
 
-**A1 —— 续训时命令行给的超参全部被静默忽略。**
-- 现象：同一个模型分别用 `--learning-rate 2e-4` 和 `1e-4` 续训 5 万步，**两次评估数字逐位相同**
-  （177.2 / 62.8 / 138.4）。
-- 根因：`SAC.load()` 走 `cls(...) → model.__dict__.update(data) → model.__dict__.update(kwargs)`。
-  checkpoint 里存的超参在 `update(data)` 时整个恢复，而 `SAC.load()` **不传 kwargs**，
-  所以构造函数参数没机会覆盖。
-- 修法（`train.py` 续训段）：显式比对 + `setattr`，覆盖
-  `learning_rate / batch_size / tau / gamma / gradient_steps / target_entropy / train_freq`。
-  **光赋值 `learning_rate` 还不够**——SB3 里它**不是 property**，每个梯度步真正生效的是
-  `SAC.train()` 里的 `_update_learning_rate([actor.optimizer, critic.optimizer, ent_coef_optimizer])`，
-  它读的是 `self.lr_schedule(...)`。所以必须连 `model.lr_schedule = get_schedule_fn(lr)` 一起换，
-  否则三个优化器一个都不动。
-- 影响：课程脚本每一级都写着 `LR=2e-4`，实际一直跑的是建模型时的 3e-4；
-  而 3e-4 恰好是微调最差的那个（实测 62.8 分 / 1 级台阶，对比 1e-4 的 122.5 分 / 6 级）。
-  **这就是"训练反而把模型练坏"的主因之一。**
+**A1: CLI hyperparameters were silently ignored during resumed training.**
+- Symptom: resuming the same model for 50k steps with `--learning-rate 2e-4` and
+  `1e-4` produced **bit-for-bit identical evaluation results** (177.2 / 62.8 / 138.4).
+- Root cause: `SAC.load()` follows `cls(...) → model.__dict__.update(data) →
+  model.__dict__.update(kwargs)`. `update(data)` restores all checkpoint
+  hyperparameters, and calling `SAC.load()` **without kwargs** provides no overrides.
+- Fix in the resume branch of `train.py`: explicitly compare and use `setattr` to
+  override `learning_rate / batch_size / tau / gamma / gradient_steps /
+  target_entropy / train_freq`. **Assigning `learning_rate` alone is not enough.**
+  It is **not a property** in SB3. Each gradient step uses
+  `_update_learning_rate([actor.optimizer, critic.optimizer, ent_coef_optimizer])`
+  in `SAC.train()`, which reads `self.lr_schedule(...)`. Also replace
+  `model.lr_schedule = get_schedule_fn(lr)`; otherwise none of the three optimizers
+  changes its learning rate.
+- Impact: every curriculum stage specified `LR=2e-4`, but training actually kept
+  the model's initial 3e-4. That was the worst measured fine-tuning rate: 62.8 return
+  / 1 stair level, versus 122.5 / 6 levels at 1e-4. **This was one of the main
+  reasons further training made the model worse.**
 
-**A2 —— 续训时 checkpoint 里的旧奖励权重会覆盖 `config.py` 的改动。**
-- 现象：改了 `climb` 默认值、给 `base_height` 加了死区，续训后策略行为毫无变化。
-- 根因：同 A1，`load_resume_configs` 从 checkpoint 的 `config.json` 恢复奖励权重，
-  **只认字段名不认代码**。
-- 修法：**换课程阶段必须加 `--fresh-reward`**（用当前 `RewardCfg` 默认值，不沿用 checkpoint 的）。
-- 同类：**换阶段必须显式写 `--terrain`**，否则沿用被续训模型自己的。
+**A2: Old checkpoint reward weights override changes in `config.py` on resume.**
+- Symptom: changing the default `climb` weight and adding a `base_height` dead zone
+  produced no behavioral change after resuming.
+- Root cause: as in A1, `load_resume_configs` restores reward weights from the
+  checkpoint's `config.json`; **it recognizes field names, not code changes**.
+- Fix: **changing curriculum stages requires `--fresh-reward`**, which uses current
+  `RewardCfg` defaults instead of checkpoint weights.
+- Related rule: **explicitly pass `--terrain` when changing stages**, or the
+  resumed model's terrain is retained.
 
-**A3 —— `--steps` 续训时是"本阶段再练多少步"，不是累计目标。**
-- 根因：SB3 在 `reset_num_timesteps=False` 时执行 `total_timesteps += self.num_timesteps`
-  （`base_class.py:416`）。
-- 影响：按累计算的话每级都会被放大成几百万步，课程推不到最后一级（第一次跑课程就这么废掉的：
-  想练 25 万步，实际练了 100 万）。
+**A3: On resume, `--steps` means additional steps for this stage, not a cumulative target.**
+- Root cause: with `reset_num_timesteps=False`, SB3 executes
+  `total_timesteps += self.num_timesteps` (`base_class.py:416`).
+- Impact: interpreting it as a cumulative target inflated every stage to millions
+  of steps and prevented the curriculum from reaching its final stage. The first
+  curriculum attempt failed this way: intended 250k steps, actually trained 1M.
 
-**A4 —— `gradient_steps` 的语义不是"每次更新几步"。**
-- 真相：它是"每收集一轮做几次更新"，而**一轮 = `train_freq × n_envs` 个环境步**
-  （`collect_rollouts` 里 `self.num_timesteps += env.num_envs`）。
-- 实测旧 checkpoint：`_n_updates=412,498 / num_timesteps=3,300,024 = 0.1250`——
-  写 `1` 配 8 环境，UTD 只有 **1/8**，330 万环境步只做了 41 万次更新。
-- `-1` 是 SB3 的标准 UTD=1（`gradient_steps = rollout.episode_timesteps = 8`），
-  代价是墙钟时间约 8 倍。
-- ⚠️ **改成 UTD=1 到底有没有好处还没测出结论**。实测 UTD=1 反而让策略塌得更快
-  （rw4 用 1/8 撑了 40k 步，rw5 用 1 只撑了 20k），但那几轮都叠着别的变量。
-  **不要把它当成"已知更优"来推荐。** 历史课程一直用的是 1。
+**A4: `gradient_steps` does not mean "steps per update."**
+- Actual meaning: updates per collection round, where **one round =
+  `train_freq × n_envs` environment steps** (`collect_rollouts` increments
+  `self.num_timesteps += env.num_envs`).
+- Measured old checkpoint: `_n_updates=412,498 / num_timesteps=3,300,024 = 0.1250`.
+  With `1` and 8 environments, UTD is only **1/8**: 3.3M environment steps yielded
+  only about 410k updates.
+- `-1` gives SB3's standard UTD=1 (`gradient_steps = rollout.episode_timesteps = 8`),
+  at approximately eight times the wall-clock cost.
+- **Warning: whether UTD=1 helps has not been established.** In measured runs it
+  actually accelerated collapse: rw4 at 1/8 lasted 40k steps, while rw5 at 1 lasted
+  only 20k. Those runs also differed in other variables. **Do not recommend it as
+  known to be better.** The historical curriculum used 1 throughout.
 
-**A5 —— TensorBoard 全写进同一个 `runs/`。**
-- 根因：SB3 只按 `SAC_<n>` 递增编号，几十轮课程下来一个目录里堆几十个 event 文件、
-  步数区间互相重叠。
-- 后果：读曲线时会把不同学习率、不同地形的 run 混成一条（实测被误导过一次：
-  3.35M 处同时出现 −11.98 / 122.5 / 50.61 / 219.4 四个"同一个点"）。
-- 修法：按 `--save-dir` 的名字分目录（`train.py` 里已做）。
+**A5: All TensorBoard runs were written into a single `runs/` directory.**
+- Root cause: SB3 only increments `SAC_<n>`. After dozens of curriculum runs, one
+  directory contained dozens of event files with overlapping step ranges.
+- Impact: curves from different learning rates and terrains were mixed into one.
+  This caused an actual misdiagnosis: at 3.35M, -11.98 / 122.5 / 50.61 / 219.4 all
+  appeared as the "same point."
+- Fix: separate directories by `--save-dir` name (implemented in `train.py`).
 
-### B. 奖励设计类
+**A6: The seeded buffer disabled timeout handling, and resumed training inherited it
+(diagnosed 2026-10-11; fixed 2026-10-12).**
+- Root cause: `go2_sac.train.seed_replay_buffer` constructed `ReplayBuffer` with
+  `handle_timeout_termination=False`, then replaced `model.replay_buffer`. Loading
+  the `.pkl` on resume retained False. Although the environment correctly returned
+  `truncated`, the buffer did not record `TimeLimit.truncated`, so timeout critic
+  targets were cut off at `r` as if they were genuine terminations, violating
+  invariant 8 in §4.
+- Measurements: in the `go2_sac_steps_s1.00/best` buffer, 459 of 578 complete
+  episodes lasted exactly 1000 steps, but all `timeouts` were zero. The same flag
+  was False for `full_s0.56/rl_1750016`, with 417 of 597 episodes at exactly 1000
+  steps. That duration strongly suggests timeout, but old arrays alone cannot
+  exclude a genuine termination on that same step.
+- Repair requirements: correctly save and handle timeout labels for new data.
+  **Setting the old buffer's flag to True does not recover lost labels.** Plan
+  data refresh/recollection. No training ablation has been performed, so this
+  defect cannot be claimed to explain all regression by itself.
+- Fix: seeding records `done=terminated or truncated` and `TimeLimit.truncated`;
+  timeout handling is enabled. Resume rejects old buffers whose flag is False;
+  only explicit `--reset-replay-buffer` skips the old `.pkl`. When resuming with
+  an empty/missing buffer, set `learning_starts = cumulative steps + 10_000` to
+  prevent updates from starting immediately after restoration with no data.
+  Do not modify source files or invent labels from "exactly 1000 steps."
+  `collect_seed_transitions` now returns a sixth item, the timeout array; seeding
+  retains the terminal observation rather than the next episode's reset observation.
 
-**B1 —— "站着不动"必须是**恒等于** 0 分。这是全套奖励唯一必须守住的不变量。**
-调了三轮才修干净，每一轮都是同一个病根的不同表现：
+### B. Reward Design
 
-- 第一轮：`base_height` 写成 `0.5*exp(-err²/0.01)` 奖励、`track_sigma=0.25` →
-  **零动作站着不动白拿 +674 分/回合**（离地高度 0.50/步 + 速度跟踪 0.20/步），
-  而 `progress` 是 −0.0001。SAC 几步就找到这个零风险盆地，1e6 步后平均 vx 只有指令的 1/10、
-  脚最多抬 7 cm（上不了 8 cm 的槛），回报却比真去爬还高（790 vs 456）。
-  → 改成偏差惩罚 `max(0, |err| − 0.05)`（站对了正好 0）。
-- 第二轮：`track_sigma` 收到 0.1 只治了一半。高斯速度跟踪在 vx=0 时的取值是 `exp(-cmd²/σ²)`：
-  指令 0.8 时 0.002，但**指令 0.4 时是 0.19/步**——而指令在 (0.4, 0.8) 均匀采样，低指令那一半没被覆盖。
-  零动作站满 1000 步仍有 **+148.7 分**。三个状态的回报排序整个反了：
-  爬上去卡住 **−125** < 走到槛前停住 **−1.6** < 站着不动 **+148.7**。
-  → 修法是**减掉 vx=0 的地板**：`max(0, exp(-(vx−cmd)²/σ²) − exp(-cmd²/σ²))`，
-  vx=0 精确为 0 且与 σ、cmd 都无关。
-- 第三轮：`progress` 本身是**年金**（每步都付、付两百多步）。实测 5 个回合的分项：
-  爬完 6 级的回合总回报 +321，其中 `progress` +258.2、而爬楼专项收入只有 55 分
-  （`climb` +5.1、`level_bonus` +30、`success` +20）——**爬完整段楼梯不如在平地快走一段**。
-  → 改成**势能** `ΔΦ`（`Φ = x`，走廊内、`x_cap` 之前），权重 2.0 → 100.0（单位从"分/步"变成"分/米"）。
+**B1: "Standing still" must yield exactly 0 reward. This is the one invariant the
+entire reward system must preserve.**
+It took three revisions to fix completely, each exposing a different version of
+the same root cause:
 
-**B2 —— 势能塑形里的 γ 是陷阱。**
-- 教科书形式 `γΦ(s') − Φ(s)` 只在 Φ **有界**时安全。`Φ = x` 沿路一直增长，折扣就变成
-  **按停留时长计的税**：实测 50 Hz 下 Φ≈1.3、狗在**往前走**（Δx = 0.0008 m/步）时单步仍是
-  `0.995×1.2717 − 1.2725 = −0.0071`，因为泄漏项 `(1−γ)Φ = 0.0064` 比它大一个数量级。
-  要打平得每步走 `0.005·Φ` 米 → Φ=3.5 时要 0.875 m/s，**比指令速度上限还高**。
-- 看到 `progress = −664` 时不要以为是 bug，就是这个。站满 1000 步白扣 650 分。
-- **修法：直接用 `ΔΦ`**（`_progress` / `_climb` 都不乘 γ，`climb_gamma = 1.0`）。
-  展开后精确 telescope、站着恒为 0、来回走净值 0，刷不了分。
+- First revision: `base_height` was a `0.5*exp(-err²/0.01)` reward, with
+  `track_sigma=0.25`. **Standing with zero action earned +674 per episode for
+  free** (height +0.50/step, velocity tracking +0.20/step), while `progress` was
+  -0.0001. SAC quickly found this risk-free local optimum. After 1e6 steps,
+  average vx was only 1/10 of the command, feet lifted at most 7 cm (insufficient
+  for an 8 cm obstacle), yet return exceeded that of actual climbing (790 vs 456).
+  Fix: use the deviation penalty `max(0, |err| − 0.05)`, which is exactly 0 at
+  the correct standing height.
+- Second revision: reducing `track_sigma` to 0.1 only solved half the problem.
+  Gaussian velocity tracking at vx=0 is `exp(-cmd²/σ²)`: 0.002 for command 0.8,
+  but **0.19/step for command 0.4**. Commands are uniformly sampled from (0.4,
+  0.8), leaving the lower half uncovered. Standing with zero action for 1000
+  steps still earned **+148.7**. The ordering was completely wrong: climbing
+  and getting stuck **-125** < approaching the obstacle and stopping **-1.6**
+  < standing still **+148.7**. Fix: **subtract the vx=0 floor**:
+  `max(0, exp(-(vx−cmd)²/σ²) − exp(-cmd²/σ²))`. At vx=0 the reward is exactly 0,
+  independent of σ and cmd.
+- Third revision: `progress` itself was **recurring income**, paid every step
+  for more than two hundred steps. Measured component totals over 5 episodes:
+  a six-level completion earned +321, including `progress` +258.2, while
+  stair-specific income was only 55 (`climb` +5.1, `level_bonus` +30, `success`
+  +20). **Climbing the entire staircase paid less than brisk walking on flat
+  ground.** Fix: change to the **potential increment** `ΔΦ` (`Φ = x`, within
+  the corridor and before `x_cap`), and change the weight from 2.0 to 100.0;
+  the units change from reward/step to reward/meter.
 
-**B3 —— 走廊权重 `w(y)` 必须乘在"增量"上，不能乘在"累积势能"上。**
-- 第一版是硬闸门（`|y|>1.25` 时 Φ 直接置 0）：单步在 x=3.0 处横跨闸门就是 ±300 的悬崖，
-  实测打出 `progress = −376 / −664 / −654`，看着像"它在倒退 6 米"（场地一共才 4 m 宽）。
-- 第二版改成连续衰减 `1 − (|y|/gate)³`：抹掉了单步跳变，**抹不掉结算**——
-  一个跑到 x=3.83、横漂到 |y|=1.42 的回合，w 归零，前面攒的势能全部吐回去（progress = −174），
-  明明净前进了 2.2 m。后果：去爬然后摔变成 −211，站着不动只有 −52，**"站着不动"重新变成最优解**。
-- 终版 `progress = Δx · w(y)`：走廊外 Δx 挣 0 分（照样防住绕旁边平地白拿），
-  但漂出去不倒扣已经挣到的；走廊内仍然 telescoping。
+**B2: γ in potential-based shaping is a trap.**
+- The textbook form `γΦ(s') − Φ(s)` is safe only when Φ is **bounded**. With
+  `Φ = x` increasing along the course, discounting becomes **a tax on time spent**.
+  Measured at 50 Hz, with Φ≈1.3 and the robot **moving forward**
+  (Δx = 0.0008 m/step), reward was still
+  `0.995×1.2717 − 1.2725 = −0.0071`, because the leakage term
+  `(1−γ)Φ = 0.0064` was an order of magnitude larger. Breaking even requires
+  `0.005·Φ` meters per step; at Φ=3.5 this means 0.875 m/s, **above the maximum
+  commanded speed**.
+- A result such as `progress = −664` is not a separate implementation bug; this
+  is the cause. Standing for 1000 steps costs 650 points for no reason.
+- **Fix: use `ΔΦ` directly.** Neither `_progress` nor `_climb` multiplies by γ;
+  `climb_gamma = 1.0`. The expanded sum telescopes exactly, standing yields 0,
+  and moving back and forth yields a net 0, preventing that exploit.
 
-**B4 —— 惩罚项要留死区和底噪，否则它们惩罚的是"正在爬"这件事。**
-爬台阶时狗必然是"前脚在上、后脚在下"的跨坐姿势，机身天然比目标矮一截；
-小腿顶着台阶沿往上蹭时接触力稳定在几十牛——那是爬不是撞。
-原样计费时"卡在槛上"整回合要赔 125 分，策略于是学会**根本不靠近台阶**
-（实测走到 x≈0.94、机身前缘正好顶在 x=1.1 的槛面上就停住，20 万步毫无进展）。
-→ `base_height` 留 0.05 m 死区、`collision` 减 25 N 底噪。
+**B3: Corridor weight `w(y)` must multiply the increment, not the accumulated potential.**
+- The first version used a hard gate: set Φ directly to 0 when `|y|>1.25`.
+  Crossing it at x=3.0 caused a ±300 one-step discontinuity. Measured
+  `progress = −376 / −664 / −654`, as though the robot had moved backward
+  6 meters in a course only 4 m wide.
+- The second version used continuous decay, `1 − (|y|/gate)³`. It removed the
+  one-step jump, **not the final accounting problem**. In an episode reaching
+  x=3.83 and drifting to |y|=1.42, w became zero and all accumulated potential
+  was returned (`progress = −174`), despite a net 2.2 m of forward travel.
+  Climbing and then falling scored -211, while standing still scored only -52;
+  **standing still became optimal again**.
+- Final version: `progress = Δx · w(y)`. Outside the corridor, Δx earns 0
+  (still preventing free rewards for bypassing terrain on flat ground), but
+  drifting out does not revoke income already earned. Inside the corridor,
+  the sum still telescopes.
 
-**B5 —— 前进项必须在 `|y| > 1.25`、`x > 3.5` 处归零。**
-地形各方块只有 y∈[−2, 2] 宽，外面是**无限平地**。不设闸门的话，绕到地形旁边走平地
-就能白拿前进奖励（x 无上限地涨）——这是这套地形里最容易刷的分。
+**B4: Penalties need dead zones and a force-noise allowance; otherwise they punish
+the act of climbing.**
+Climbing necessarily involves a straddling stance, with front feet above and rear
+feet below, leaving the base lower than its target. Sliding a calf against a
+stair edge produces sustained contact forces of tens of newtons: that is climbing,
+not a collision. Without allowances, getting stuck on an obstacle cost 125 points
+per episode, teaching the policy **not to approach stairs at all**. Measured
+behavior stopped at x≈0.94, with the front of the body against the obstacle face
+at x=1.1, and made no progress for 200k steps.
+Fix: a 0.05 m dead zone for `base_height`, and subtract a 25 N noise allowance
+from `collision`.
 
-**B6 —— 预热数据必须重新标注奖励（`POSTURE_TERMS`）。**
-- 现象：奖励改完之后，预热 buffer 的平均分变成 **−0.286 分/步**（A=1.0、8 回合、8/8 摔倒）。
-  分项：`yaw_rate −0.181`、`yaw −0.162`、`lateral −0.142`，而 `progress +0.156`、`track_lin_vel +0.150`。
-- 根因：`trot_action` **只驱动大腿和小腿**（`a[1::3]`、`a[2::3]`），**没有髋关节**，
-  横向和航向物理上不可控、必然自转横漂。而新奖励把"站着不动"砍到**恰好 0**，
-  于是预热在教 critic：**"小跳比站着差"**——与它的设计意图完全相反。
-  （旧奖励下站着有 +0.19 保底，所以这个反转一直没暴露。）
-- 修法：`collect_seed_transitions` 里把姿态/能耗项
-  （`base_height lateral orientation yaw yaw_rate action_rate torques collision`）置零，
-  只保留任务项。置零后 **+0.238 分/步**（小跳段 +0.283 vs 站立 0）。
-- 这仍只是 critic 的**起点**，之后会被真实转移逐步纠正，不影响正确性。
+**B5: The progress term must become zero for `|y| > 1.25` and `x > 3.5`.**
+Terrain blocks extend only across y∈[−2, 2]; beyond them is **infinite flat ground**.
+Without a gate, the policy can go around the terrain and collect free forward
+reward as x increases without limit. This is the easiest exploit in this course.
 
-**B7 —— 罚项必须能被策略看见：加航向观测、`lateral`(y²) 换成 `lateral_vel`(世界系 vy²)。**
-- 现象（排查 日志.md 时测的）：800k 步模型 30 局随机指令里 11 局"拖着一条腿慢慢蹦跶"，
-  发作局末 `|y| = 2.50`（走廊边界出局）、`|yaw| = 1~3 rad`。
-- 根因一：`projected_gravity` **在数学上取不出 yaw**（重力向量绕竖直轴旋转不变），
-  所以 45 维观测里关于航向只有 gyro 第三维（速率）。而 `yaw = −1.0·(1−cos yaw)`、
-  `lateral = −0.3·y²` 罚的都是**绝对量**——策略看不见，学不会纠偏。
-  实测 rl_800000 平地 6 局逐步收支：`lateral −0.510`（最大支出）、`yaw −0.093`（第二），
-  两项占每步支出的 73%，而最大收入才 `track_lin_vel +0.669`。
-- 根因二：横漂**不是侧滑，是机头偏了**。手调开环小跑 10 局实测：世界系 `vy²=0.0462`、
-  `|vy|=0.186`，机体系 `vy²` 只有 `0.0022`——**差 21 倍**。所以"横向速度"必须取世界系
-  （`RewardInput.base_v[1]`，它正是旧罚项 y² 的时间导数，直接对应"漂出走廊"）；
-  照抄 Isaac 惯例罚机体系等于罚了个寂寞。加了航向观测后这一项**可推断**
-  （yaw 已知 ⇒ `vy_world ≈ −sin(yaw)·vx`），于是从"看不见的税"变成"可控制项"。
-- 修法：① 观测加 `(sin yaw, cos yaw)`（取自 `imu_state.quaternion`，真机零成本，
-  满足 §4 不变量 4）；② 新增 `lateral_vel = −5.0·vy_world²`，旧 `lateral` 权重置 0
-  （保留字段与函数体：老 `config.json` 与 `POSTURE_TERMS` 都按名字引用它）。
-  位置性的约束仍由 progress 的走廊权重 `w(y)` 承担（§5-B5），那条挂在"走"上。
-- 权重标定：手调小跑 `vy²=0.0462 → −0.217/步`（实测 8 局）；干净直行 ~0.0025 → ~−0.01/步；
-  每步最大收入 +1.32，所以坏步态付 ~17% 收入、好步态近乎免费，好/坏有 ~20 倍区分度。
-  偏大的风险是低指令端退化成"原地趴窝"（vy=0 零代价、零收入），真出现就降到 −3.0。
-- **代价**：观测维度 45→47、奖励项 14→15，**所有旧模型和旧 replay buffer 全部失效**。
-  改的当天 `models/`/`runs/` 已被清空，没有实际损失。
+**B6: Demonstration rewards must be relabeled (`POSTURE_TERMS`).**
+- Symptom: after the reward changes, the seeded buffer averaged **-0.286
+  reward/step** (A=1.0, 8 episodes, 8/8 falls). Components: `yaw_rate −0.181`,
+  `yaw −0.162`, `lateral −0.142`, versus `progress +0.156` and `track_lin_vel +0.150`.
+- Root cause: `trot_action` **drives only thighs and calves** (`a[1::3]`,
+  `a[2::3]`), **not hips**. Lateral motion and heading are physically uncontrolled,
+  inevitably causing rotation and drift. Meanwhile, the new reward makes
+  standing still worth **exactly 0**. Seeding therefore teaches the critic that
+  **small hops are worse than standing**, the opposite of its purpose. The old
+  standing reward of +0.19 had hidden this reversal.
+- Fix: in `collect_seed_transitions`, zero the posture/energy terms
+  (`base_height lateral orientation yaw yaw_rate action_rate torques collision`)
+  and retain only task terms. The result is **+0.238 reward/step** (hopping
+  segments +0.283 vs standing 0).
+- This is still only **an initial starting point** for the critic. Real
+  transitions gradually correct it afterward, without affecting correctness.
 
-### C. 仿真 / 几何类
+**B7: Penalties must be observable to the policy: add heading observations and
+replace `lateral` (y²) with `lateral_vel` (world-frame vy²).**
+- Symptom, measured while investigating `日志.md`: an 800k-step model dragged
+  one leg and hopped slowly in 11 of 30 episodes with randomized commands.
+  Those episodes ended with `|y| = 2.50` (corridor-boundary termination) and
+  `|yaw| = 1~3 rad`.
+- First root cause: `projected_gravity` **cannot mathematically reveal yaw**,
+  since rotating a gravity vector around the vertical axis does not change it.
+  Thus, the 45-dimensional observation provided only the third gyro component
+  (yaw rate) for heading. But `yaw = −1.0·(1−cos yaw)` and
+  `lateral = −0.3·y²` penalized **absolute quantities** the policy could not
+  observe or correct. In 6 flat-ground episodes with rl_800000, per-step
+  accounting showed `lateral −0.510` (largest expense) and `yaw −0.093` (second).
+  Together they made up 73% of per-step expenses, while the largest income was
+  only `track_lin_vel +0.669`.
+- Second root cause: lateral drift is **heading misalignment, not sideways
+  slipping**. Across 10 manually tuned open-loop trot episodes, world-frame
+  `vy²=0.0462`, `|vy|=0.186`, versus body-frame `vy²` of only `0.0022`, a
+  **21-fold difference**. Use world-frame lateral velocity
+  (`RewardInput.base_v[1]`, the time derivative associated with the old y²
+  penalty, directly related to drifting out of the corridor). Copying the
+  Isaac convention of penalizing body-frame motion misses this effect. With
+  heading observed, the term becomes **inferable**
+  (known yaw ⇒ `vy_world ≈ −sin(yaw)·vx`), turning an unobservable tax into a
+  controllable penalty.
+- Fix: (1) add `(sin yaw, cos yaw)` to observations, from
+  `imu_state.quaternion`, at no extra real-robot cost and satisfying invariant
+  4 in §4; (2) add `lateral_vel = −5.0·vy_world²` and set the old `lateral`
+  weight to 0, preserving its field and function because old `config.json`
+  files and `POSTURE_TERMS` refer to its name. Position constraints remain
+  in progress's corridor weight `w(y)` (§5-B5), tied to forward movement.
+- Weight calibration: manually tuned trot `vy²=0.0462 → −0.217/step`
+  (8 measured episodes); clean straight walking ~0.0025 → ~-0.01/step.
+  Maximum per-step income is +1.32, so a bad gait pays about 17% of income,
+  while a good gait pays almost nothing, with about 20-fold discrimination.
+  Overweighting risks low-command policies that crouch in place (vy=0,
+  zero cost, zero income); if that happens, reduce the weight to -3.0.
+- **Cost**: observations changed from 45 to 47 dimensions and reward terms
+  from 14 to 15, **invalidating all old models and replay buffers**. `models/`
+  and `runs/` had already been cleared that day, so there was no actual loss.
 
-**C1 —— 出生点必须按整只狗的脚印取最大地形高度，不能用身体中心那一点。**
-用 `TerrainHeight.top_footprint`，不用 `TerrainHeight.top`。
-- 根因：狗身长约 0.4 m，横跨高度不连续处（槛的棱、台阶的立面）时，**中心还在平地、
-  前脚已经探到台阶上方**。按中心高度出生会把前脚连同小腿**直接生成在地形内部**。
-- 实测：scale=0.62 时 24 个出生点里 **17 个有脚被埋，最深 0.0915 m**；求解器一上来就给巨大
-  接触力，狗在 0.3 秒内被弹翻。**穿深 ≈ 那条棱的高度差，所以地形越高越严重**
-  （scale 0.35 时只有 3 cm，到 1.0 就是 15 cm）。
-- 这是"课程越往上、训练反而越差"的一个真凶，**和 reward、学习率、action_scale 都无关**。
-- 顺带：`home` 关键帧的脚底本来就陷进地面约 18 mm，reset 时抬到地形上方让它自己落稳是对的。
+**B8: `level_bonus` was repeatable rather than once per new level per episode
+(diagnosed 2026-10-11; fixed 2026-10-12).**
+- Root cause: `_level_bonus` compared current and preceding-step levels, and
+  `env.step` updated `prev_terrain_level` to the current level each step.
+  Descending and climbing again paid the same level bonus a second time.
+- Measurement: `full_s0.56/rl_1750016`, seed 10015, reached at most level 2
+  but collected 19 positive level increments, worth +95, in 1000 steps.
+  True once-per-new-level accounting would pay at most +10.
+- Repair requirement: compare against the episode's highest historical level,
+  initialized on reset; repeated ascent/descent is not new progress. This is
+  a definite accounting defect, but later models earned less from this term,
+  so it cannot be the sole main cause of this regression.
+- Fix: retain the field name `prev_terrain_level` but define it as the
+  **episode maximum before the current step**, updated with max each step
+  and initialized to the spawn level on reset. `1→2→1→2→3` pays only
+  `5/5/0/0/5`. The climb term still uses consecutive-step height differences
+  and penalizes descent. Isaac's `core.advance` also takes per-environment
+  maxima; reset_joints clears level history for resetting environments, and
+  post-reset observations initialize their spawn levels. Old buffers' repeated
+  rewards are not automatically relabeled.
 
-**C2 —— `reset` 后必须 `mj_forward` 一次。**
-否则接触/传感器数据还是上一回合的。**`geom_xpos`（四只脚的位置，支撑面高度从它取）同理**：
-它只在前推/步进里更新，`prev_terrain_h` 必须在 `mj_forward` **之后**取，否则读到的
-是上一回合的落点——出生点离台阶近时能差一整级。`core_parity` 的 `_pose()` 也要跟着前推，
-不然合成状态量的是"别人脚下那片地形"。
+### C. Simulation / Geometry
 
-**C3 —— 摔倒判据要有余量，不能凭直觉取。**
-完全瘫倒时 base 离地约 0.077 m，而跨台阶（机身已在上一级正上方、脚还在下一级）余量最低
-约 0.12 m。所以 `fall_clearance = 0.10`——**取 0.12 以上会把正常的跨步误判成摔倒**。
-`flip_rad = 1.0`：跨 0.15 m 台阶时 pitch 合法地能到约 0.4 rad，取 0.8 太紧。
+**C1: Spawn height must use the maximum terrain height over the robot's whole
+footprint, not its body center.**
+Use `TerrainHeight.top_footprint`, not `TerrainHeight.top`.
+- Root cause: the body is about 0.4 m long. Across a height discontinuity
+  (obstacle edge or stair riser), **the center can still be above flat ground
+  while front feet already extend over the raised terrain**. Center-based
+  spawning puts the front feet and calves **directly inside the terrain**.
+- Measurement: at scale=0.62, **17 of 24 spawn positions buried at least one
+  foot, up to 0.0915 m deep**. The solver immediately applied huge contact
+  forces and flipped the robot within 0.3 seconds. **Penetration depth is
+  approximately the height difference at the edge, so higher terrain is worse**:
+  only 3 cm at scale 0.35, but 15 cm at 1.0.
+- This is a real cause of worsening training at higher curriculum stages,
+  **independent of reward, learning rate, and action_scale**.
+- Also, feet in the `home` keyframe already penetrate the ground by about
+  18 mm. Raising the robot above terrain on reset and letting it settle is correct.
 
-**C4 —— `goal_z` 必须按地形量出来，不能写死。**
-`goal_z = terrain.top(goal_x) + goal_clearance`。写死 1.05 在课程缩放后失效
-（scale=0.3 的平台只有 0.28 m 高，永远判不了成功）。
-没有台阶的地形（`flat`/`steps`）必须把 `goal_z` 设成 `inf`——否则 `flat` 上"走到 x≥3.3"
-就判成功、回合提前结束（实测平地回报从 715 掉到 281）。
+**C2: Call `mj_forward` once after `reset`.**
+Otherwise contact and sensor data still belong to the preceding episode.
+**The same applies to `geom_xpos`, the four foot positions used for support height.**
+It updates only during forward computation/stepping. Read `prev_terrain_h`
+**after** `mj_forward`, or it uses the preceding episode's landing location,
+potentially a whole level away when spawning near stairs. `_pose()` in
+`core_parity` must also run forward computation; otherwise synthetic state
+measurements use terrain under an unrelated previous pose.
 
-**C5 —— 抬脚高度必须在**跳过落地过程之后**量。**
-reset 把狗放在地形上方 0.30~0.33 m 让它自己落稳，**下落时四条腿全是悬空的**，
-那一瞬间量到的"抬脚高度"能到 0.15 m——比真走路高一倍，会得出"脚抬得起来"的错误结论。
-`diag lift` 的 `skip` 参数就是为此加的。
+**C3: Fall criteria need measured clearance margins, not intuition.**
+Fully collapsed, the base is about 0.077 m above ground. During stair crossing,
+with the body over the next level but feet below, the minimum clearance is about
+0.12 m. Therefore `fall_clearance = 0.10`: **values of 0.12 or above falsely
+classify normal crossing as a fall**. Use `flip_rad = 1.0`; crossing a 0.15 m
+step can legitimately produce pitch of about 0.4 rad, so 0.8 is too restrictive.
 
-**C6 —— "当地地形高度"必须取自四只脚（`support_height`），不能取机身中心处的 `top()`。**
-C1 说的是出生点，这里说的是奖励与终止用的那个高度——同一个"地形在棱处不连续"的两面。
-`climb` / `level_bonus` / `base_height` / `is_fallen` **全部**吃这个数，取错一处、四处都错。
-- 根因：机身中心越过台阶立面时，狗**还在平地上、脚一个都没上去**，`top()` 已经返回上一级的高度。
-- 实测（s0.86 模型，台阶 0.1462 m）：`climb` 一次白拿 0.1462×100 = **+14.6**、`level_bonus` **+5.0**，
-  而当时的姿态是四只脚里只有一只搭在台阶上、roll 已经 −0.66 在侧翻。10 个评估回合里 7 个
-  在 25~59 步内以 roll≈−1.0 结束——**"伸头蹭一下台阶就倒地"是这套奖励的最优解**。
-- 这也解释了"最远 x 卡在 2.1 且对课程高度不敏感"：2.1 是几何位置（第一级台阶立面），
-  不是难度问题。真让前脚爬上台阶（x 更靠前、脚已踩上第 1/2 级）拿到的分**一模一样**，
-  等于没有任何梯度去完成"把后腿也收上来"那半截动作。
-- 取法：四只脚下方地形高度的**中位数**。踏面深 0.19~0.28 m < 狗脚印 0.4 m，狗站楼梯上
-  永远是两条腿在一级、两条腿在相邻一级，中位数正好落在**它踩着的那一级**：
-  平地=0、两前腿上一级=半级、跨两级=较低那级、上了顶平台=顶面高度。
-  取 min 要求四条腿全上去（踏面放不下，信号太稀疏）；取 max 一只脚悬空就能刷分，和取错一样。
-- **torch 侧不能用 `torch.median`**：偶数个样本它返回中间偏下那个，而 `np.median` 取中间两个的
-  平均，四只脚横跨两级时两者差半级台阶——而那恰恰是最常见的一帧（`core_parity` 有专门一条盯它）。
-- 连带：`is_fallen` 的入参从"地形对象 + 位置"改成"支撑面高度 + 位置"；诊断里看"最高台阶"
-  要用 `env.support_level()`，用 `terrain.level(x, y)` 会报出比实际高一级的数
-  （就是当年那个虚高的来源）。
-- **Isaac 侧多一个接线坑**：`FL_foot` 是个**空 body**，位置正好压在脚底球心上
-  （calf 系下 `0 0 -0.213`）。转 USD 时它可能被并进 `*_calf`，那样 `body_pos_w` 拿到的
-  是膝关节、采样点整体偏 0.21 m——不崩不报错。`smoke.py` 的抽查里有一条量它
-  （站住时脚底球心离地 ≈0.022，膝关节 ≈0.235）。
+**C4: Measure `goal_z` from terrain; do not hardcode it.**
+Use `goal_z = terrain.top(goal_x) + goal_clearance`. Hardcoded 1.05 fails when
+terrain is scaled: the platform at scale=0.3 is only 0.28 m high, making success
+impossible. For terrain without stairs (`flat`/`steps`), `goal_z` must be `inf`;
+otherwise reaching x≥3.3 on `flat` counts as success and ends the episode early,
+reducing measured flat-ground return from 715 to 281.
 
-### D. 评估 / 选模型类
+**C5: Measure foot lift only after skipping the initial landing phase.**
+Reset places the robot 0.30~0.33 m above terrain so it can settle. **All four
+feet are airborne while it falls.** Counting that instant yields "foot lift"
+up to 0.15 m, twice the actual walking value, falsely suggesting sufficient
+foot clearance. This is why `diag lift` has a `skip` parameter.
 
-**D1 —— `model_of` 必须取每级最好的模型，不能取最后一个。**
-难度一顶到天花板，训练就开始把策略往"别冒险"上拽（摔倒会终止回合、丢掉剩下九成的回报），
-于是**最后一个 checkpoint 恰恰是最差的**。
-实测 `st_s056`：`model.zip` 回报 111 / 成功率 1/5，而 `best_model.zip` 是 269 / 4/5。
-取最后一个等于每级都拿退化模型喂下一级，越滚越糟。
-推论：如果某一级训练从没赢过它的起点，`best_model` 会**原样继承**上一级的模型。
-拿两个阶段的 best 对比就能看出来——实测 `st2_s056` 和 `st2_s062` 的每维 `|mu|` 逐位相同，
-它们就是同一个模型，**整条课程从 scale 0.56 起就在空转**。
+**C6: "Local terrain height" must come from the four feet (`support_height`),
+not `top()` at the body center.**
+C1 concerns spawning; this concerns the height used by rewards and termination.
+Both arise from terrain discontinuities at edges. `climb` / `level_bonus` /
+`base_height` / `is_fallen` **all** consume this value: one wrong definition
+breaks all four.
+- Root cause: when the body center crosses a stair riser, the robot **can still
+  have every foot on flat ground**, but `top()` already returns the next level.
+- Measurement for the s0.86 model, stair height 0.1462 m: `climb` awarded
+  0.1462×100 = **+14.6** and `level_bonus` **+5.0** with only one foot on the
+  stair and roll already -0.66 as the robot tipped over. Of 10 evaluation
+  episodes, 7 ended at 25~59 steps with roll≈-1.0. **Extending the head across
+  the stair and then falling was optimal under that reward.**
+- This also explains maximum x stuck at 2.1 regardless of curriculum height:
+  2.1 is a geometric location, the first stair riser, not a difficulty threshold.
+  Actually moving the front feet onto levels 1/2 at a larger x earned
+  **exactly the same reward**, leaving no gradient incentive to bring up the
+  rear legs and complete the motion.
+- Definition: use the **median of the terrain heights under the four feet**.
+  Stair tread depth, 0.19~0.28 m, is shorter than the 0.4 m footprint, so two
+  legs are on one level and two on the adjacent level. The median represents
+  **the level supporting the robot**: flat=0, two front legs on the first
+  level=half a level, spanning two levels=the lower level, reaching the top
+  platform=its top height. Min requires all four feet to ascend, impossible
+  to fit on a tread and too sparse as a signal. Max lets one airborne foot
+  above a stair collect the full reward, reproducing the exploit.
+- **Do not use `torch.median` on the torch side.** For an even sample count it
+  returns the lower middle value, whereas `np.median` averages the two middle
+  values. With feet spanning adjacent levels, this differs by half a step,
+  exactly the most common case, explicitly covered in `core_parity`.
+- Related changes: `is_fallen` takes support height + position instead of
+  terrain object + position. For highest-level diagnostics, use
+  `env.support_level()`. `terrain.level(x, y)` reports one level too high,
+  which caused the old inflated measurements.
+- **Isaac has an additional integration pitfall**: `FL_foot` is an **empty
+  body** exactly at the foot-sphere center (`0 0 -0.213` in the calf frame).
+  USD conversion may merge it into `*_calf`, causing `body_pos_w` to point
+  to the knee and shifting sampling upward by 0.21 m without an error.
+  `smoke.py` checks this: standing foot-sphere center height is approximately
+  0.022, while knee height is approximately 0.235.
 
-**D2 —— `eval_episodes` 必须够（默认 20），否则 `best_model` 是在按噪声选。**
-5 个回合的成功率标准误是 **±22 个百分点**，而 `best_model` 是在所有评估里**取极大值**——
-选出来的必然是幸运样本。实测同一个模型：
+### D. Evaluation / Model Selection
 
-| 评估回合数 | 报出的成功率 |
+**D1: `model_of` must select the best model at each stage, not the final model.**
+Once difficulty reaches the policy's limit, training starts pulling it toward
+avoiding risk: a fall terminates the episode and forfeits the remaining nine
+tenths of return. Thus **the final checkpoint is precisely the worst one**.
+Measured `st_s056`: `model.zip` return 111 / success 1/5, versus `best_model.zip`
+return 269 / success 4/5. Selecting the final model feeds a regressed policy into
+each subsequent stage, compounding the problem.
+Implication: if a stage never improves on its starting point, `best_model`
+**inherits the preceding stage's model unchanged**. Compare best models across
+stages: measured `st2_s056` and `st2_s062` had bit-for-bit identical `|mu|` in
+every dimension. They were the same model; **the entire curriculum had been
+making no progress since scale 0.56**.
+
+**D2: Use enough `eval_episodes` (default 20), or `best_model` selects noise.**
+With 5 episodes, the success-rate standard error is **±22 percentage points**.
+Since `best_model` takes **the maximum across evaluations**, it inevitably
+selects a lucky sample. Measured results for the same model:
+
+| Evaluation episodes | Reported success rate |
 |---|---|
-| 5（旧默认） | 4/5 = **80%** |
+| 5 (old default) | 4/5 = **80%** |
 | 20 | 8/20 = 40% |
 | 40 | 12/40 = **30%** |
 
-这直接制造了"每一级训练都把模型练坏了"的假象：拿一个幸运样本的旧评估去比一个新评估，
-必然下降。**看到"训练把模型练坏了"先查评估回合数。**
+This directly creates the illusion that every curriculum stage makes the
+model worse: comparing a lucky old evaluation with a new evaluation will
+inevitably show a decline. **When training appears to degrade the model,
+check the number of evaluation episodes first.**
 
-**D3 —— 行为是双峰的，看"到顶几个"而不是"平均末级"。**
-要么爬完 6 级，要么很早就摔（同一个模型 20 个回合：确定性 9/20、随机 7/20）。
-"平均末级"会被双峰分布稀释。
+**D3: Behavior is bimodal; count completions rather than averaging final levels.**
+The policy either completes all 6 levels or falls very early. For the same model
+over 20 episodes: deterministic 9/20, stochastic 7/20. Averaging final levels
+obscures this bimodal distribution.
 
-**D4 —— `eval/vx_ratio` 会在策略崩溃时静默变成 NaN。**
-`np.mean([])` 的返回值：5 个回合全部在 100 步内结束时，装速度的列表是空的。
-那个 NaN 看着像"仿真数值发散"，实际含义是"策略一上去就摔"。
-`train.py` 里已在空列表时退化到全程平均并加 ⚠ 标注。
+**D4: `eval/vx_ratio` can silently become NaN when the policy collapses.**
+`np.mean([])` returns NaN. If all 5 episodes end within 100 steps, the velocity
+list is empty. This looks like simulation divergence but actually means the
+policy falls immediately. `train.py` now falls back to whole-episode averages
+for empty lists and adds a warning marker.
 
-**D5 —— 评估要看 `eval/vx_ratio`（实际速度/指令速度），不要只看回报。**
-回报有保底项时完全没有分辨力：曾经那个"原地站着"的策略回报 771，
-比它真去爬槛的 456 还高。
+**D5: Evaluate `eval/vx_ratio` (actual speed / commanded speed), not just return.**
+Return is uninformative when it includes guaranteed income: a stationary policy
+once scored 771, more than an actual obstacle-climbing policy's 456.
 
-**但要知道这个数是怎么算的**：`EvalMetricsCallback` 只统计 `step_count > 100` 的步
-（本意是跳过起步那 2 s 的加减速）。回合一短，这个窗口就只剩**尾巴**——而尾巴正好是
-"走到台阶前停住不动"那段，于是 `vx_ratio` 打印出 0.1× 这种数，看着像"根本不会走"，
-其实前面 1.8 m 是好好走过去的（`mean_max_x` 从出生点 0.2 一路到 2.0）。
-要看"走没走起来"**同时**看 `mean_max_x` 和回合长度；`vx_ratio` 只在回合接近 1000 步
-（真的走满 20 s）时才是稳态速度。
+**Understand how the metric is calculated.** `EvalMetricsCallback` uses only
+steps with `step_count > 100`, intended to skip the first 2 s of acceleration.
+For short episodes, this leaves only the **tail**, precisely the period of
+standing still in front of stairs. A `vx_ratio` of 0.1× then looks like an
+inability to walk, although the robot actually traversed the first 1.8 m
+(`mean_max_x` increased from spawn x=0.2 to 2.0). To determine whether it got
+moving, examine **both** `mean_max_x` and episode length. `vx_ratio` represents
+steady-state speed only when episodes approach 1000 steps, the full 20 s.
 
-### E. 工具 / 操作类（agent 自身要小心）
+**D6: `eval/max_level` measured the maximum final level across episodes, not
+the trajectory peak (diagnosed 2026-10-11; fixed 2026-10-12).**
+- Root cause: `EvalMetricsCallback` read `info["level"]` only after `run_episode`
+  returned, tracking only maximum x along the way. Climbing and subsequently
+  falling erased progress from the logs.
+- Measurement: `full_s0.56/rl_1750016`, seeds 10000–10019, mean trajectory
+  peak 1.25 versus mean final level only 0.35.
+- Repair requirement: accumulate the peak using `support_level()` every step
+  and log final levels separately. The peak uses the existing support-surface
+  criterion; it does not prove stable standing and cannot replace completion rate.
+- Fix: accumulate trajectory peaks during evaluation. Environment
+  `info["max_level"]` includes the spawn level. Existing `eval/mean_level` /
+  `eval/max_level` now report trajectory statistics; final levels are stored
+  as `eval/mean_final_level` / `eval/max_final_level`. Old logs are not
+  backfilled. This change does not alter success criteria or reward-only selection.
+- Regression validation: all 17 tests in
+  `python -m unittest go2_common.tests.test_training_fixes -v` pass, covering
+  seeded/online timeouts, rejection of legacy buffers, fresh-data collection
+  after reset, checkpoint save/resume, repeated ascent/descent, and spawn levels.
+  `go2_issac.tests.course_parity` and `go2_issac.tests.core_parity` also pass;
+  maximum reward parity difference is 7.105e-15. These validate CPU semantics
+  and the reset adapter, not Isaac Sim execution or long-training comparisons.
 
-**E1 —— `pkill -f 'go2_sac.train'` 会杀掉自己。**
-`pkill -f` 匹配的是**完整命令行**，而你的 bash 命令行里就含这个字面量。
-✅ 用 `pkill -f 'go2_sac[.]train'`（方括号让模式不匹配自身），
-并且**把它单独放一条命令**，不要和任何含该字面量的命令写在同一个 `bash -c` 里。
+**D7: Reward-only best-model selection can favor approaching stairs quickly and
+then falling; D1 does not guarantee preservation of climbing ability.**
+- Same-seed backtest on 2026-10-11: fixed
+  `full scale=0.56 / action_scale=0.7 / reset_x=(-0.3,0.75)`, with 20 training
+  evaluation seeds and 20 held-out seeds. Early `rl_1750016`: return 89.25,
+  mean length 789 steps, reached ≥2 levels in 10/40. `full_s0.56/best`
+  (2450024 steps): return 228.73, 289 steps, 4/40. `full_s1.00/best`
+  (3200072 steps), backtested on low stairs: return 240.85, 369 steps, 0/40.
+  All three completed the course in 0/40.
+- Reward accounting: early positive income +403, penalties -314. The 0.56
+  best's positive income fell to +324, but penalties shrank to -96. Climb
+  income changed only from +6.04 to +7.43; higher return mostly came from
+  reducing ongoing penalties, not completing more stairs.
+- Repair direction: prioritize task success, then reliable climbing progress,
+  then return. Add lower-difficulty regression evaluations and curriculum
+  advancement thresholds. **The historical §7 conclusion that reward ordering
+  was correct applies only to the policies tested then, not every reward version.**
+  No training ablation was performed in this diagnosis; weight changes still
+  require single-variable comparisons. Raw data and full analysis are in
+  `logs/full_diagnosis_20261011/REPORT.md` (the logs directory is gitignored).
 
-**E2 —— Bash 工具默认超时 120 s。** `sleep 540` 之类必须显式传 `timeout`（毫秒，上限 600000），
-或者用 `run_in_background`。
+### E. Tools / Operations (Agent-Side Precautions)
 
-**E3 —— 不要在共享 scratch（如 `/tmp`）里用通配符批量删除。**
-`rm -rf /tmp/lrtest_*` 这类命令会被权限系统拦（"Shared Scratch Sweep"）。
-用**新的、具名的目录**，需要清理就逐个删。
+**E1: `pkill -f 'go2_sac.train'` can kill its own command.**
+`pkill -f` matches the **entire command line**, and the bash command line itself
+contains that literal string. Use `pkill -f 'go2_sac[.]train'`: the brackets
+prevent the pattern from matching itself. **Run it as a separate command**;
+do not put it in the same `bash -c` as commands containing that literal string.
 
-**E4 —— SB3 内部 API 的几个坑（写诊断脚本时会踩）。**
-- `m.policy.actor.get_action_dist_params(obs)` 返回 **3 个值**（SB3 2.9），不是 2 个也不是 4 个。
-- **不要在 `torch.no_grad()` 里算 `mu/log_std` 然后拿去求导**——张量没有 `grad_fn`，
-  报错是 `element 0 of tensors does not require grad`。
-- 同一组参数连续 backward 两次会报 `Trying to backward through the graph a second time`，
-  要么 `retain_graph=True`，要么每次重新前向。
-- `m.policy.actor.log_std` **是网络层不是张量**（`.detach()` 会报
-  `'Linear' object has no attribute 'detach'`），要读 σ 用 `get_action_dist_params`。
-- `m.policy.actor(obs)` **直接返回动作**，不是 tuple，`[0]` 取到的是第一行。
-- `float(m.ent_coef)` 会报 `could not convert string to float: 'auto'`，
-  用 `float(m.log_ent_coef.exp())`。
-- 读 TensorBoard 的 `ScalarEvent`：`for e in scalars: e.value`，
-  `for _, v in scalars` 会报 `cannot unpack non-iterable ScalarEvent`。
+**E2: The Bash tool's default timeout is 120 s.** Commands such as `sleep 540`
+require an explicit `timeout` (milliseconds, maximum 600000) or `run_in_background`.
 
-**E5 —— `play.py` 退出时 `glfwTerminate()` 会段错误。**
-本机 Wayland 下 glfw 的清理函数必崩，**与本项目代码无关**。`play.py` 已经绕过：
-viewer 跑完不调 `glfwTerminate`，主动按正常退出码结束进程。
-看到退出时那段 segfault 不要当成仿真或策略的问题去查。
+**E3: Do not delete shared scratch files, such as those in `/tmp`, using wildcards.**
+Commands such as `rm -rf /tmp/lrtest_*` are blocked by the permission system
+("Shared Scratch Sweep"). Use **new, explicitly named directories** and delete
+them individually when cleanup is needed.
 
-**E6 —— `ctrl/go2_ctrl.py` 的构造函数会读 `sys.argv[1]` 当网卡名。**
-原始写法是 `ChannelFactoryInitialize(0, sys.argv[1])` 直接取命令行第一个参数。
-于是 `play.py --model foo.zip` 一导入它就会执行 `ChannelFactoryInitialize(0, "foo.zip")`。
-已给构造函数加可选 `domain_id` / `interface` 参数，**显式传入时优先于 `sys.argv`**，
-不传时行为不变。凡是从别的脚本（而不是直接 `python3 ctrl_test.py 网卡名`）导入 `Go2Ctrl`，
-都必须显式传这两个参数，不要依赖 `sys.argv`。
+**E4: Pitfalls in SB3's internal APIs when writing diagnostic scripts.**
+- `m.policy.actor.get_action_dist_params(obs)` returns **3 values** in SB3 2.9,
+  not 2 or 4.
+- **Do not compute `mu/log_std` inside `torch.no_grad()` and then differentiate
+  them.** The tensors lack `grad_fn`, producing
+  `element 0 of tensors does not require grad`.
+- Backpropagating twice through the same parameter computation raises
+  `Trying to backward through the graph a second time`. Use `retain_graph=True`
+  or repeat the forward pass each time.
+- `m.policy.actor.log_std` **is a network layer, not a tensor**. `.detach()`
+  raises `'Linear' object has no attribute 'detach'`. Read σ through
+  `get_action_dist_params`.
+- `m.policy.actor(obs)` **returns actions directly**, not a tuple; `[0]` selects
+  the first row.
+- `float(m.ent_coef)` raises `could not convert string to float: 'auto'`.
+  Use `float(m.log_ent_coef.exp())`.
+- Read TensorBoard `ScalarEvent` objects with `for e in scalars: e.value`.
+  `for _, v in scalars` raises `cannot unpack non-iterable ScalarEvent`.
 
-### F. PPO / on-policy 专有（SAC 那份代码里没有这些坑）
+**E5: `glfwTerminate()` segfaults when `play.py` exits.**
+On this machine's Wayland setup, glfw cleanup consistently crashes; **this is
+unrelated to project code**. `play.py` works around it by not calling
+`glfwTerminate` after viewer playback, explicitly exiting with a normal status.
+Do not investigate that exit-time segfault as a simulation or policy defect.
 
-**F1 —— 想改 `n_steps` / `batch_size`，绝不能调 `model._setup_model()`。**
-- 现象：它会**重建策略网络**。`OnPolicyAlgorithm._setup_model()` 里有一句无条件的
-  `self.policy = self.policy_class(...)`，跑完权重全变成随机初始化的。
-- 根因：SAC 是 off-policy，`_setup_model` 只管网络和 buffer；PPO 复用了同一个函数，
-  而 PPO 的策略网络也在这个函数里建。
-- 修法（`go2_ppo/train.py` 续训段）：**只重建 rollout buffer**，照抄 `_setup_model` 里建 buffer 的
-  那几行（`rollout_buffer_class(n_steps, obs_space, act_space, device, gamma, gae_lambda, n_envs)`），
-  并且放在 gamma/gae_lambda 都设好之后。
-- 为什么安全：`rollout_buffer` 在 `_excluded_save_params` 里，**根本不存进 checkpoint**，
-  `load()` 时本来就会重建，所以重建它不丢任何东西。
-- 实测：续训（`--n-steps 256→128 --batch-size 256→64`）前后 `policy.state_dict()` 的
-  sha256 **逐位相同**（`ac4f1709…`），buffer 变成 `(128, 2, 45)`。
+**E6: The `ctrl/go2_ctrl.py` constructor reads `sys.argv[1]` as the network interface.**
+The original `ChannelFactoryInitialize(0, sys.argv[1])` took the first CLI
+argument directly. Importing it from `play.py --model foo.zip` therefore called
+`ChannelFactoryInitialize(0, "foo.zip")`. The constructor now accepts optional
+`domain_id` / `interface` arguments, with **explicit values taking precedence
+over `sys.argv`**; omitted arguments preserve the old behavior. Whenever another
+script imports `Go2Ctrl`, rather than directly running
+`python3 ctrl_test.py <network-interface>`, pass both arguments explicitly.
+Do not rely on `sys.argv`.
 
-**F2 —— `clip_range` 和 `learning_rate` 从 `load()` 回来时**形态不一样。
-- `clip_range` 是 `FloatSchedule`（`PPO._setup_model` 无条件包一层），而 `PPO.train()` 里写的是
-  `self.clip_range(self._current_progress_remaining)`。直接 `setattr(model, "clip_range", 0.2)`
-  → 第一次更新就抛 **`TypeError: 'float' object is not callable`**。
-- `learning_rate` 反过来：`BaseAlgorithm.__init__` 只是把它存下来，load 回来**就是裸 float**，
-  所以 `model.learning_rate(1.0)` 会同样报 `'float' object is not callable`（**实测踩到过**，
-  当时的写法是假设它俩都是 schedule）。但它仍然要连 `model.lr_schedule` 一起换（同 A1）。
-- 修法：用 `_lr_or_clip_value(v) = float(v(1.0)) if callable(v) else float(v)` 统一取值，
-  `clip_range` 用 `FloatSchedule(...)` 重新包一层。
+### F. PPO / On-Policy Specific (Not Present in the SAC Implementation)
 
-**F3 —— `log_interval` 在 on-policy 里是"训练迭代数"，不是回合数。**
-SAC 那份的 `log_interval=4` 是"每 4 个结束的回合记一次"；PPO 的默认 `1` 是
-**每采完一轮 rollout（`n_steps × n_envs` 步）就记一次**。别把两个数字互相搬。
+**F1: Never call `model._setup_model()` to change `n_steps` / `batch_size`.**
+- Symptom: it **rebuilds the policy network**.
+  `OnPolicyAlgorithm._setup_model()` unconditionally executes
+  `self.policy = self.policy_class(...)`, replacing weights with random initialization.
+- Root cause: SAC is off-policy and `_setup_model` manages networks and the
+  buffer; PPO reuses that function, which also constructs the policy network.
+- Fix in the resume branch of `go2_ppo/train.py`: **rebuild only the rollout
+  buffer**, using the corresponding `_setup_model` construction:
+  `rollout_buffer_class(n_steps, obs_space, act_space, device, gamma, gae_lambda, n_envs)`.
+  Do this after setting gamma/gae_lambda.
+- Why safe: `rollout_buffer` is in `_excluded_save_params` and **is not saved
+  in checkpoints**. `load()` already rebuilds it, so reconstruction loses nothing.
+- Measurement: before/after resume with `--n-steps 256→128 --batch-size 256→64`,
+  the `policy.state_dict()` sha256 was **identical** (`ac4f1709…`), while the
+  buffer changed to `(128, 2, 45)`.
 
-**F4 —— `train/*` 曲线比 `rollout/*` 晚一个记录点，只跑一轮时压根没有 `train/*`。**
-- 根因：`OnPolicyAlgorithm.learn()` 里 `dump_logs()` 在 `self.train()` **之前**调用，
-  而 `logger.dump()` 才是真正写 TB 的时刻。于是第 N 轮更新算出来的 `train/approx_kl` 等，
-  要到第 N+1 次 dump 才落盘（记在第 N+1 轮的步数上）。
-- 实测：512 步（1 轮迭代）跑完，TB 里只有 11 个 `rollout/* / eval/* / time/*` 标签，
-  **一个 `train/*` 都没有**；1024 步（2 轮）才有，且全部落在 `step=1024` 这一个点上。
-- 推论：**看到"`train/*` 怎么没数据"先看是不是跑得太短，不要怀疑 TB 写坏了。**
-  另外最后一轮更新的 `train/*` 不会出现在 TB 里。
+**F2: `clip_range` and `learning_rate` have different forms after `load()`.**
+- `clip_range` is a `FloatSchedule`, unconditionally wrapped by
+  `PPO._setup_model`; `PPO.train()` calls
+  `self.clip_range(self._current_progress_remaining)`. Directly assigning
+  `setattr(model, "clip_range", 0.2)` causes the first update to raise
+  **`TypeError: 'float' object is not callable`**.
+- Conversely, `BaseAlgorithm.__init__` merely stores `learning_rate`; after
+  loading it **is a plain float**. `model.learning_rate(1.0)` therefore also
+  raises `'float' object is not callable`. **This was encountered in practice**
+  when code incorrectly assumed both were schedules. `model.lr_schedule`
+  must still be replaced too, as in A1.
+- Fix: read either form with
+  `_lr_or_clip_value(v) = float(v(1.0)) if callable(v) else float(v)`, and
+  rewrap `clip_range` with `FloatSchedule(...)`.
 
-**F5 —— PPO 的 `n_steps` 不能照抄 SB3 的默认 2048。**
-策略 50 Hz、回合上限 20 s = 1000 步，2048 步是 **41 s**——一轮 rollout 比整个回合还长，
-同一段轨迹的陈旧数据被反复拿来做优势估计。默认改成 **256**（= 每环境 5.12 s）。
-`batch_size=256` 取 `n_steps × n_envs` 的约数，换 `--n-envs` 也不会出现零头 minibatch。
+**F3: On-policy `log_interval` counts training iterations, not episodes.**
+SAC's `log_interval=4` logs after every 4 finished episodes. PPO's default `1`
+logs **after every collected rollout (`n_steps × n_envs` steps)**. Do not copy
+these values between algorithms.
+
+**F4: `train/*` curves lag `rollout/*` by one logging point; a single iteration
+produces no `train/*` data.**
+- Root cause: `OnPolicyAlgorithm.learn()` calls `dump_logs()` **before**
+  `self.train()`. `logger.dump()` performs the actual TensorBoard write.
+  Therefore, iteration N's `train/approx_kl` and other metrics are written
+  only at iteration N+1's dump, with iteration N+1's step count.
+- Measurement: 512 steps (1 iteration) produced only 11
+  `rollout/* / eval/* / time/*` tags, **no `train/*` tags**. After 1024 steps
+  (2 iterations), they appeared, all at the single point `step=1024`.
+- Implication: **when `train/*` data is missing, first check whether the run
+  was too short; do not assume TensorBoard is broken.** The last iteration's
+  `train/*` values are not written either.
+
+**F5: Do not copy SB3's default PPO `n_steps=2048`.**
+At a 50 Hz policy rate, an episode is limited to 20 s = 1000 steps; 2048 steps
+is **41 s**, longer than an entire episode. Stale data from the same trajectories
+is repeatedly used for advantage estimation. The default was changed to **256**,
+or 5.12 s per environment. Choose `batch_size=256` as a divisor of
+`n_steps × n_envs` to avoid partial minibatches when changing `--n-envs`.
 
 ---
 
-### G. Isaac Sim 迁移（`go2_issac/`）
+### G. Isaac Sim Migration (`go2_issac/`)
 
-**G0 —— 当前开发机跑不了 Isaac Sim，这不是"配置问题"是硬件。**
-`nvidia-smi` 不存在、只有 AMD HawkPoint1 核显、内存 27 GB（要 ≥32）、
-`/` 剩 21 GB（要 ~50）、Python 3.10.12（要 3.11）。**Isaac Sim 没有 CPU 回退**——
-`--cpu` 只是"用 CPU 跑张量"，物理和渲染照样要 GPU。别在这台机器上试装。
-所以 `go2_issac/` 刻意分两层：语义层（本机可证明）+ 接线层（只能上机）。
-这是没有显卡时唯一能把风险压下去的办法，**不要为了"统一"把语义层搬进 `mdp/`**——
-那样它就跟着 isaaclab 一起变成不可测的了。
+**G0: The development machine cannot run Isaac Sim; this is hardware, not configuration.**
+`nvidia-smi` is unavailable. The machine has only an AMD HawkPoint1 integrated
+GPU, 27 GB RAM (requires ≥32), 21 GB free on `/` (needs ~50), and Python 3.10.12
+(requires 3.11). **Isaac Sim has no CPU fallback.** `--cpu` only runs tensors on
+CPU; physics and rendering still require a GPU. Do not try to install it here.
+Thus `go2_issac/` deliberately has two layers: semantics (provable locally) and
+runtime integration (target machine only). This is the only way to reduce risk
+without a GPU. **Do not move the semantic layer into `mdp/` for "consistency"**;
+that would make it depend on isaaclab and prevent local testing.
 
-**G1 —— 增益不在 USD 里，MJCF 转换器不管这件事。**
-`default_drive_stiffness` 是 **URDF** 转换器的字段，MJCF 那边没有。
-`go2.xml` 的 `<motor>` 只变成 USD 的 DriveAPI，kp/kd 必须由 `ImplicitActuatorCfg` 在
-实例化时写回。而且 `damping` 要写 **3.6 不是 kd=3.5**：MuJoCo 的 12 个铰链自己带
-`damping=0.1`，Isaac 的隐式执行器只有 `damping` 一个旋钮，两个要加起来
-（依据：`assets/go2_reference.json` 的 `joints[].damping`，实测 0.1）。
+**G1: Gains are not in USD; the MJCF converter does not handle them.**
+`default_drive_stiffness` is a **URDF** converter field, absent from the MJCF
+converter. `<motor>` in `go2.xml` becomes only a USD DriveAPI; `ImplicitActuatorCfg`
+must write kp/kd at instantiation. Set `damping` to **3.6, not kd=3.5**:
+MuJoCo's 12 hinge joints each have `damping=0.1`, while Isaac's implicit actuator
+has only one damping parameter, so add them. Reference:
+`joints[].damping` in `assets/go2_reference.json`, measured as 0.1.
 
-**G2 —— 关节顺序有三个，只认名字不认下标。**
-MJCF 的 `qpos` 跟身体树（FL,FR,RL,RR）、执行器/DDS 是 FR,FL,RR,RL、USD 里是导入顺序。
-`mdp/state.py` 里 `JOINT_NAMES` 显式写死成 DDS 顺序，然后按名字查下标，启动时断言 12 个
-名字全都对得上。**动作也要按名字重排一次**（`raw_action`）：动作项内部的顺序来自
-`find_joints`（= USD 顺序），和 `State.q/dq/tau` 用的 DDS 顺序不一定一样，错了不报错、
-只是学不出来。同理不依赖 `preserve_order` 这个字段（老版本没有）。
+**G2: There are three joint orders; identify joints by name, not index.**
+MJCF `qpos` follows the body tree (FL,FR,RL,RR), actuators/DDS use FR,FL,RR,RL,
+and USD uses import order. `JOINT_NAMES` in `mdp/state.py` explicitly specifies
+DDS order, then resolves indices by name and asserts all 12 names match on startup.
+**Reorder actions by name too** (`raw_action`): action terms use `find_joints`
+(USD order), which may differ from the DDS order used by `State.q/dq/tau`.
+Getting this wrong produces no error, just failure to learn. Likewise, do not
+depend on `preserve_order`, which older versions do not have.
 
-**G3 —— `prev_action` 必须是"夹过之后"的动作。**
-`env.py:194` 是 `action = clip(action); self.prev_action = action`——先夹再存。
-Isaac 的 `ActionTerm.raw_actions` 是"网络吐出来的原值"，夹取只改 `processed_actions`。
-所以 `state.raw_action()` 里**自己再夹一次**。这不是边角情况：策略初始 σ=1.0，
-约 1/3 的动作 `|a|>1`，不夹的话观测里的"上一拍动作"和 MuJoCo 侧系统性对不上。
+**G3: `prev_action` must contain the clipped action.**
+`env.py:194` does `action = clip(action); self.prev_action = action`: clip first,
+then store. Isaac's `ActionTerm.raw_actions` is the raw network output; clipping
+only changes `processed_actions`. Therefore **clip again** in `state.raw_action()`.
+This is not a corner case: initial policy σ=1.0 means about 1/3 of actions have
+`|a|>1`. Without clipping, the previous-action observation systematically differs
+from MuJoCo.
 
-**G4 —— 地形的坐标偏移只能上机校准，而且只影响一个常量。**
-Isaac Lab 把 patch 的**中心**写进 `env.scene.env_origins`，但"中心"这个说法在版本之间
-变过。做法不是猜，是 `smoke.py --check-terrain` 反推：对不上只改
-`course.py:COURSE_ORIGIN_FROM_ENV_ORIGIN`。同理高度场的 `horizontal_scale`/`vertical_scale`
-也要验（0.7 档的台阶高度恰好是 `vertical_scale` 的整数倍，量化误差 ≤0.5 mm）。
+**G4: Terrain coordinate offsets must be calibrated on the target machine and
+affect only one constant.**
+Isaac Lab writes the patch **center** into `env.scene.env_origins`, but the
+meaning of "center" has changed between versions. Rather than guessing, infer
+the mapping with `smoke.py --check-terrain`; if it disagrees, change only
+`course.py:COURSE_ORIGIN_FROM_ENV_ORIGIN`. Also check heightfield
+`horizontal_scale`/`vertical_scale`: at scale 0.7, stair heights are exact
+multiples of `vertical_scale`, with quantization error ≤0.5 mm.
 
-**G5 —— 跨仿真器不能续训，这是物理决定的。**
-MuJoCo 是 `elliptic` 摩擦锥 + `impratio=100`、脚底 `condim=6`（带扭转/滚动摩擦）、
-`priority=1` 独占接触对；PhysX 是各向同性库仑摩擦、没有 priority。
-**是两个不同的物理**，不是同一个物理的两种实现。所以 `go2_ppo` 的 `.zip` 与 Isaac 的 `.pt`
-互不通用（`train.py --resume` 会直接拒绝 `.zip`），曲线只能比趋势不能比数值。
-`go2_common/` 那份代码仍然只有一份——变的是仿真器，不是任务定义。
+**G5: Training cannot be resumed across simulators because their physics differ.**
+MuJoCo uses an `elliptic` friction cone + `impratio=100`, foot `condim=6`
+(torsional/rolling friction), and `priority=1` controlling the contact pair.
+PhysX uses isotropic Coulomb friction and has no priority.
+**These are different physics**, not two implementations of the same physics.
+Thus `go2_ppo` `.zip` files and Isaac `.pt` files are not interchangeable;
+`train.py --resume` explicitly rejects `.zip`. Compare curve trends, not raw values.
+`go2_common/` still has only one implementation: the simulator changes, not
+the task definition.
 
-**G6 —— rsl_rl 的超参名和 SB3 全不一样，映射表是唯一来源。**
-见 `agents/rsl_rl_ppo_cfg.py` 的模块注释。几个**语义**上等价但容易记错的：
-`gae_lambda`→`lam`、`ent_coef`→`entropy_coef`、`batch_size`→`num_mini_batches`（条数→份数）、
-`log_std_init=0` ⇔ `init_noise_std=1.0`、`target_kl` 早停 ⇔ `schedule="adaptive"+desired_kl`。
-另外 rsl_rl 的 `use_clipped_value_loss` **默认是 True**，而这边一直是"不裁 value"，
-所以必须显式关掉（默认真空两边相反，最容易静默出错）。
+**G6: rsl_rl hyperparameter names differ from SB3; the mapping table is the sole reference.**
+See the module comment in `agents/rsl_rl_ppo_cfg.py`. Easily confused but
+**semantically** equivalent mappings:
+`gae_lambda`→`lam`, `ent_coef`→`entropy_coef`, `batch_size`→`num_mini_batches`
+(sample count to partition count), `log_std_init=0` ⇔ `init_noise_std=1.0`,
+and `target_kl` early stopping ⇔ `schedule="adaptive"+desired_kl`.
+Also, rsl_rl's `use_clipped_value_loss` **defaults to True**, while this project
+does not clip the value loss. Explicitly disable it: opposite defaults are
+particularly prone to silent mismatch.
 
-**G7 —— 超时走 `truncated` 这件事在 Isaac 里叫 `time_out=True`。**
-终止项的**名字**必须是 `time_out` 且带 `time_out=True`，rsl_rl 才会把它填进
-`extras["time_outs"]` 做 bootstrap。写成普通终止项 = 超时处价值被截断，和 `env.py` 的
-`truncated` 语义相反（第 4 节不变量 8）。
+**G7: Isaac represents timeout truncation with `time_out=True`.**
+The termination term must be **named** `time_out` and have `time_out=True`,
+so rsl_rl puts it in `extras["time_outs"]` for bootstrapping. A normal
+termination cuts off value at timeouts, opposite to the `truncated` semantics
+in `env.py` (invariant 8 in §4).
 
 ---
 
-## 6. 实测数据（回答"这机器人能做多难"）
+## 6. Measured Results (How Difficult a Task the Robot Can Handle)
 
-### 6.1 `action_scale` 是几何约束，不是调参
+### 6.1 `action_scale` Is a Geometric Constraint, Not Just a Tuning Parameter
 
-关节目标 = 默认站姿 + `action_scale` × 动作，它直接决定狗能跨多高的坎。
+Joint target = default stance + `action_scale` × action. This directly determines
+the height of obstacles the robot can cross.
 
-**不要用"固定机身扫关节可达集"来估这个值**——那样量到的是"原地摆姿势脚能抬多高"，
-跟"走着撞上坎、要靠摩擦顶上去"完全是两回事，会**严重高估**：
-0.40 时静态可达 15.8 cm，听起来 8 cm 的坎绰绰有余，实际连碰都碰不上去。
+**Do not estimate this by fixing the body and sweeping the joint workspace.**
+That measures how high a foot can be posed while stationary, not whether the
+robot can walk into an obstacle and push itself up through friction. It
+**seriously overestimates capability**: at 0.40, static reach is 15.8 cm,
+apparently ample for an 8 cm obstacle, but the moving robot cannot get onto it.
 
-可信的测法只有一个：拿手调开环小跳（无反馈，`train.trot_action`）直接撞坎
-（`diag frontier`）：
+The only credible measurement is a manually tuned open-loop hop, without
+feedback (`train.trot_action`), directly attempting obstacles (`diag frontier`):
 
 | action_scale | 0.06 m | 0.08 m | 0.10 m | 0.12 m |
 |---|---|---|---|---|
-| 0.40 | 卡 | 卡 | 卡 | 卡 |
-| 0.60 | 过 | 卡 | 卡 | 卡 |
-| 0.80 | 过 | 过 | 过 | 卡 |
+| 0.40 | Stuck | Stuck | Stuck | Stuck |
+| 0.60 | Crossed | Stuck | Stuck | Stuck |
+| 0.80 | Crossed | Crossed | Crossed | Stuck |
 
-带反馈的策略比这套开环小跑大约好一档（0.40 时开环只能过 0.04，平地训出来的策略能过 0.06）。
-场景里那两个坎是 0.08 m，所以 **A=0.4 根本过不去**：策略会走到 x≈0.94 就停住，
-20 万步零进展。**这不是奖励或探索的问题**，当时却一直在奖励函数里找原因。
+A feedback policy performs about one height increment better than this open-loop
+trot: at 0.40, open loop crosses only 0.04, while a flat-trained policy crosses
+0.06. The scene's two obstacles are 0.08 m, so **A=0.4 cannot cross them**.
+The policy stops at x≈0.94 and makes no progress for 200k steps. **This is not
+a reward or exploration problem**, although reward functions were initially
+blamed.
 
-`diag lift` 直接量抬脚高度（脚是半径 0.022 的球，下表是**脚底**离地；
-行是 action_scale、列是动作幅度）：
+`diag lift` directly measures foot clearance. The foot is a sphere of radius
+0.022; the table gives **the foot's bottom surface** above ground. Rows are
+action_scale; columns are action amplitude:
 
-| | 幅度 0.5 | 0.7 | 1.0（接近饱和） |
+| | Amplitude 0.5 | 0.7 | 1.0 (near saturation) |
 |---|---|---|---|
-| A=0.6 前脚 | 0.053 | 0.086 | 0.098~0.139 |
-| A=0.6 后脚 | 0.034 | 0.065 | 0.104~0.128 |
-| **A=0.8 前脚** | 0.077 | 0.103~0.124 | 开环撑不住 |
-| **A=0.8 后脚** | 0.059 | **0.100~0.113** | 开环撑不住 |
+| A=0.6 front feet | 0.053 | 0.086 | 0.098~0.139 |
+| A=0.6 rear feet | 0.034 | 0.065 | 0.104~0.128 |
+| **A=0.8 front feet** | 0.077 | 0.103~0.124 | Open loop cannot stay stable |
+| **A=0.8 rear feet** | 0.059 | **0.100~0.113** | Open loop cannot stay stable |
 
-要点：(1) A=0.6 时后脚要顶到接近饱和才过得了 0.08——0.7 幅时后脚底只有 0.065，还差 1.5 cm；
-(2) 幅度拉满会把**开环**小跑跑摔，但不等于闭环策略不能这么用。
+Key points: (1) at A=0.6, rear feet need near-saturated actions to cross 0.08;
+at amplitude 0.7 their bottom surfaces reach only 0.065, short by 1.5 cm.
+(2) Maximum amplitude makes the **open-loop** trot fall, but that does not
+mean a closed-loop policy cannot use it.
 
-### 6.2 已训策略的真实上限 ≈ 0.10~0.11 m
+### 6.2 The Trained Policy's Real Limit Is Approximately 0.10~0.11 m
 
-用 A=0.7 训出来的策略（`st2_s056_full/best`，20 回合），横扫 terrain_scale：
+Sweep terrain_scale with an A=0.7-trained policy (`st2_s056_full/best`, 20 episodes):
 
-| terrain_scale | 首级台阶高 | 成功/20 | 最高级 |
+| terrain_scale | First stair height | Successes/20 | Highest level |
 |---|---|---|---|
 | 0.56 | 0.095 m | 8/20 (40%) | 6/6 |
 | 0.60 | 0.102 m | 7/20 | 6/6 |
@@ -596,127 +871,175 @@ MuJoCo 是 `elliptic` 摩擦锥 + `impratio=100`、脚底 `condim=6`（带扭转
 | 0.80 | 0.136 m | 0/20 | 4/6 |
 | 1.00 | 0.170 m | 0/20 | 1/6 |
 
-**是平滑退化，不是悬崖**——所以"某一级训练失败/成功"的判断在 5 回合评估下完全不可靠（见 D2）。
+**Degradation is gradual, not a cliff**, so declaring a stage a success or
+failure based on 5 evaluation episodes is completely unreliable (see D2).
 
-同一策略横扫 action_scale（不重新训练）：
+Sweep action_scale with the same policy, without retraining:
 
-| action_scale | terrain 0.56 成功/20 | terrain 1.00 成功/20 |
+| action_scale | Terrain 0.56 successes/20 | Terrain 1.00 successes/20 |
 |---|---|---|
-| 0.5 | 0/20（最高 1/6） | — |
-| **0.7（训练值）** | **8/20** | 0/20（1/6） |
-| 0.9 | 4/20 | 0/20（1/6） |
-| 1.1 | 1/20 | 0/20（1/6） |
-| 1.3 | 0/20（3/6） | 0/20（1/6） |
+| 0.5 | 0/20 (highest 1/6) | Not measured |
+| **0.7 (training value)** | **8/20** | 0/20 (1/6) |
+| 0.9 | 4/20 | 0/20 (1/6) |
+| 1.1 | 1/20 | 0/20 (1/6) |
+| 1.3 | 0/20 (3/6) | 0/20 (1/6) |
 
-结论：**策略死死焊在它被训练的那个 action_scale 上**，调大调小都变差；
-而在真实地形上任何振幅都是 0/20、只到 1/6 级、停在 x≈2.2。
-**振幅调不动这个上限，要更高必须重新训一套步态。**
+Conclusion: **the policy is tightly bound to its training action_scale**.
+Increasing or decreasing it worsens performance. On full-height terrain,
+every amplitude gives 0/20, reaches only 1/6 levels, and stops at x≈2.2.
+**Amplitude changes cannot raise this limit; a higher limit requires training
+a new gait.**
 
-### 6.3 地形高度课程的分级
+### 6.3 Terrain-Height Curriculum Stages
 
-`run_stairs.sh` 的梯子（`--terrain-scale` → 首级台阶高）：
+The `run_stairs.sh` progression (`--terrain-scale` → first stair height):
 
-```
+```text
 0.56 (0.095) → 0.62 (0.105) → 0.70 (0.119) → 0.78 (0.133)
 → 0.86 (0.146) → 0.93 (0.158) → 1.00 (0.170)
 ```
 
-缩放只作用于几何体高度（`size[2]`/`pos[2]` 同乘，x/y 脚印不动），
-所以台阶**踏面深度不变、只是变矮**——这正是想要的"变简单"。
+Scaling affects only geometry height (`size[2]`/`pos[2]` multiplied together),
+not the x/y footprint. Thus **tread depth is unchanged; the stairs simply
+become lower**, exactly the intended simplification.
 
-### 6.4 预热（demonstration seeding）确实有效
+### 6.4 Demonstration Seeding Really Works
 
-SAC 配一个没有相位输入的前馈 MLP，要靠逐维白噪声"发现"周期步态；而自动熵系数会把噪声
-压到 ±0.06 rad，能走起来的对角小跑需要 **±0.25 rad 的相干振荡**。结果 buffer 里全是"站着"，
-Q 只学到"站着最好"，actor 永远不迈腿。
-做法：先用 `trot_action` 采 3 万条转移填进 buffer（SACfD），**只给 Q 一个起点**。
-实测 200k 步后平均 vx 从指令的 **0.00 倍变成 0.79 倍**。
+SAC with a feed-forward MLP and no phase input must discover a periodic gait
+from independent white noise in each action dimension. Automatic entropy
+adaptation compresses noise to ±0.06 rad, while a walking diagonal trot needs
+**coherent oscillations of ±0.25 rad**. The buffer then contains only standing
+transitions, Q learns that standing is best, and the actor never steps.
+Approach: collect 30k transitions with `trot_action` and seed the buffer
+(SACfD), **giving Q only a starting point**. After 200k steps, measured average
+vx improved from **0.00 to 0.79 times the commanded speed**.
 
-配合 `log_std_init=0.0` / `target_entropy=-6.0`（不是 SB3 默认的 −1.0 / −12）：−1.0 时
-α 会迅速衰减到 0.024、200k 步后 σ 只剩 0.25。
+Use `log_std_init=0.0` / `target_entropy=-6.0`, not SB3's -1.0 / -12.
+With -1.0, α quickly falls to 0.024 and σ is only 0.25 after 200k steps.
 
 ---
 
-## 7. 当前状态与未解问题
+## 7. Current Status and Open Questions
 
-**已完成**：平地 ✓、两个 0.08 m 槛 ✓、六级台阶（0.095 m/级）✓。
+**Completed**: flat ground; two 0.08 m obstacles; six stair levels at 0.095 m/level.
 
-**PPO 通道**（`go2_ppo/`）：代码已建好，静态检查全过；跑过一次 512 步的空跑（采一轮 rollout、
-做一次更新、评估回调正常、TB 有数），**但没有任何有意义的训练**。所以：
-- 上面所有关于"能爬多高""怎么调超参"的结论**全部来自 SAC**，不能当成 PPO 的；
-- PPO 没有预热，它的起点就是 σ=1.0 的随机策略（实测空跑时回合回报 −20.8、几乎原地就摔），
-  能不能像 SAC 那样从零走起来，**没有数据**，要试就从平地那一级开始。
+**PPO path** (`go2_ppo/`): implemented, all static checks pass, with one
+512-step smoke run (collect one rollout, perform one update, evaluation callback
+works, TensorBoard records values), **but no meaningful training**. Therefore:
+- All conclusions above about climbing limits and hyperparameter tuning
+  **come from SAC**, not PPO.
+- PPO has no demonstration seeding and starts from a random policy with
+  σ=1.0. The smoke run measured -20.8 episode return and almost immediate
+  falls in place. There is **no evidence** yet that it can learn walking
+  from scratch like SAC; start with flat terrain if trying it.
 
-**Isaac Sim 通道**（`go2_issac/`）：**一次都没跑过**，因为这台机器没有 NVIDIA 显卡
-（硬件级别的跑不了，见 §5-G0）。能做到的保证和不能做的保证都写清楚：
+**Isaac Sim path** (`go2_issac/`): **never executed**, because this machine
+has no NVIDIA GPU; hardware prevents it (see §5-G0). Separate guarantees
+from untested behavior explicitly:
 
-- **已经用真 MuJoCo 对拍验过的**（本机可跑，全绿）：`course.py` 的地形几何、
-  `core.py` 的 47/48 维观测、15 项奖励、终止与成功判据——逐元素差别在 1e-15
-  级（浮点求和顺序）。资产真值（质量 15.206408 kg、前后腿不同的关节限位、
-  `damping=0.1`、脚底球 `priority=1`/`friction=0.4`）是从编译后的 `MjModel` 直接导出的。
-- **完全没验过的**：PhysX 物理本身、Isaac API 的接线、训练能不能收敛。
-  这三件事只能上机，`smoke.py --all` 就是为它们准备的（五节，一节一个结论）。
-- 所以：**上机后如果 `smoke.py` 全绿而训练不收敛，那不是"代码写错了"，
-  是这套接触动力学要不要重调奖励/超参的问题**——和当年在 MuJoCo 上从零开始面对的是同一类问题。
+- **Validated against real MuJoCo**, locally runnable and all passing:
+  `course.py` terrain geometry; `core.py` 47/48-dimensional observations,
+  15 reward terms, termination and success criteria. Element-wise differences
+  are around 1e-15, due to floating-point summation order. Asset reference
+  values (mass 15.206408 kg, different front/rear joint limits, `damping=0.1`,
+  foot-sphere `priority=1`/`friction=0.4`) were exported directly from the
+  compiled `MjModel`.
+- **Entirely untested**: PhysX itself, Isaac API integration, and training
+  convergence. These require the target machine. `smoke.py --all` is
+  designed for them, with five sections and a conclusion per section.
+- Therefore, **if all `smoke.py` checks pass on the target machine but
+  training does not converge, the question is not incorrectly written code,
+  but whether these contact dynamics require retuning rewards/hyperparameters**.
+  This is the same kind of problem encountered when first starting from
+  scratch with MuJoCo.
 
-**没上去的**：**真实的 0.15~0.17 m 台阶**。现有 A=0.7 步态在任何振幅下都够不到（见 6.2）。
+**Not completed**: **full-height 0.15~0.17 m stairs**. The existing A=0.7 gait
+cannot reach them at any amplitude (see 6.2).
 
-**A=1.0 大振幅从零重训：已做完，结论是失败**（`models/amp1_s035`，terrain_scale 0.35，
-2M 步，`gradient_steps=1`，跑完 21:03–22:26）。
+**A=1.0 large-amplitude retraining from scratch: completed, and it failed.**
+Run: `models/amp1_s035`, terrain_scale 0.35, 2M steps, `gradient_steps=1`,
+finished during 21:03–22:26.
 
-- 训练本身跑通了：750k 起 `max_level` 稳定 6/6，1.3–1.75M 步成功率在 55%~90% 之间。
-- 但**最后 250k 步发散**：成功率在 0.90 / 0.20 / 0.90 / 0.10 之间震荡（mean_reward
-  325 → 19 → 300 → 34）。最终 `model.zip` 只剩 **4/20**，而 `best_model.zip`（存于 1.0M）是
-  **16/20**——**又是 D1：最后一个 checkpoint 恰恰是最差的，差 4 倍。**
-- **横扫 terrain_scale，A=1.0 每一档都输给 A=0.7**（同脚本、同 20 个种子）：
+- Training itself worked: from 750k, `max_level` remained 6/6; success rate
+  ranged from 55%~90% between 1.3–1.75M steps.
+- But **the final 250k steps diverged**: success fluctuated between
+  0.90 / 0.20 / 0.90 / 0.10 (mean_reward 325 → 19 → 300 → 34).
+  Final `model.zip` achieved only **4/20**, whereas `best_model.zip`,
+  saved at 1.0M, achieved **16/20**. **Another D1 case: the final checkpoint
+  was the worst, by a factor of 4.**
+- **Across terrain_scale, A=1.0 lost to A=0.7 at every setting**, using
+  the same script and the same 20 seeds:
 
-  | scale | 首级高 | A=0.7（训于 0.56） | A=1.0（训于 0.35） |
+  | scale | First stair height | A=0.7 (trained at 0.56) | A=1.0 (trained at 0.35) |
   |---|---|---|---|
   | 0.35 | 0.059 | 14/20 | 16/20 |
   | 0.45 | 0.077 | **12/20** | 8/20 |
   | 0.56 | 0.095 | **10/20** | 2/20 |
-  | 0.62 | 0.105 | **4/20**（6/6） | 0/20（2/6） |
-  | 0.70 | 0.119 | **1/20**（6/6） | 0/20（1/6） |
-  | 1.00 | 0.170 | 0/20（1/6） | 0/20（1/6） |
+  | 0.62 | 0.105 | **4/20** (6/6) | 0/20 (2/6) |
+  | 0.70 | 0.119 | **1/20** (6/6) | 0/20 (1/6) |
+  | 1.00 | 0.170 | 0/20 (1/6) | 0/20 (1/6) |
 
-  在 0.35 那一格 A=0.7 从没训练过（它训于更高的 0.56）也拿到 14/20——A=1.0 多花的 200 万步
-  没买到任何东西。腿摆动确实更大（0.23 vs 0.17），但**摆得高 ≠ 爬得上**。
+  A=0.7 had never trained at scale 0.35, only at the higher 0.56, yet still
+  achieved 14/20 there. The extra 2M steps for A=1.0 bought nothing.
+  Leg swings were larger (0.23 vs 0.17), but **higher swings do not mean
+  better climbing**.
 
-**结论：`action_scale` 调不动上限，重新训一套大振幅步态也调不动。** 6.2 节测的是"策略焊死在
-训练时的 action_scale 上"，这里是更强的一条：**换一套更大的振幅从头训，上限一样不动。**
-不要再往这个方向投入算力。
+**Conclusion: changing `action_scale` does not raise the limit, and neither
+does retraining a larger-amplitude gait.** Section 6.2 shows the policy is
+tied to its training action_scale. This is a stronger result: **even training
+a new larger-amplitude policy from scratch leaves the limit unchanged**.
+Do not spend more compute on this direction.
 
-**下一步（尚未验证的假设）**：A=0.7 那条课程是在出生点穿模 bug 下训出来的
-（`st2_s056_full/best_model.zip` 存于 19:20，`top_footprint` 修复 20:10 才进 `env.py`），
-而这个 bug 的穿深与地形高度成正比（0.35 档 3 cm、1.0 档 15 cm），**正好在它卡住的 0.62 往上最狠**。
-它带着这个 bug 都能到 10/20@0.56——用修好的 env 重跑梯子，是当前最有依据的一次尝试。
+**Next step, an unverified hypothesis**: the A=0.7 curriculum was trained
+with the spawn-penetration bug. `st2_s056_full/best_model.zip` was saved at
+19:20, while the `top_footprint` fix entered `env.py` only at 20:10.
+Penetration depth scales with terrain height, from 3 cm at 0.35 to 15 cm
+at 1.0, **worst precisely from the 0.62 scale where progress stalls**.
+Despite this bug, it reached 10/20@0.56. Rerunning the progression with
+the fixed environment is currently the best-supported next attempt.
 
-**已证伪、不要再试的假设**（都做过测量）：
-- ~~"奖励排序反了"~~ —— 同一批种子、同一套权重下：成功策略 +140.5/回合、半途摔 +53.3、
-  更差 +1.4。排序是对的。
-- ~~"critic 变悲观 → actor 跟着塌"~~ —— 把 `target_entropy` 从 −6 降到 −12 后，
-  α 0.102→0.038、σ 0.411→0.252、Q 稳在 −5.91（起点 −4.92），**策略照样 20k 步塌到 0/20**。
-  在 Q 完全健康的情况下行为崩掉，因果链不成立。
-- ~~"critic 在策略动作附近没有坡度"~~ —— 实测 `|dQ/da| ≈ 5.1`，沿坡度走一小步 Q 涨 +0.220；
-  且 `|g_Q| = 3.47 > |g_ent| = 2.49`，Q 项主导 actor 梯度。
-- ~~"微调必然毁策略"~~ —— 0.62 那一级的策略其实爬得上去（6/6 到顶、25% 成功率），
-  之前"失败"的结论是 5 回合评估比出来的假象。
-- ~~"加幅度能提高攀爬上限"~~ —— 见上表，A=1.0 从头训完 2M 步，每一档都不如 A=0.7。
+**Falsified hypotheses; do not repeat them** (all measured):
+- ~~"Reward ordering is reversed."~~ With the same seeds and weights:
+  successful policy +140.5/episode, mid-course fall +53.3, worse policy +1.4.
+  The ordering was correct.
+- ~~"The critic becomes pessimistic, causing actor collapse."~~ Reducing
+  `target_entropy` from -6 to -12 changed α from 0.102 to 0.038 and σ
+  from 0.411 to 0.252; Q stayed at -5.91, starting from -4.92.
+  **The policy still collapsed to 0/20 in 20k steps.** Behavior failed
+  with a healthy Q, so the proposed causal chain does not hold.
+- ~~"The critic has no slope near policy actions."~~ Measured
+  `|dQ/da| ≈ 5.1`; a small step along the gradient raised Q by +0.220.
+  Also, `|g_Q| = 3.47 > |g_ent| = 2.49`, so the Q term dominated
+  the actor gradient.
+- ~~"Fine-tuning inevitably destroys the policy."~~ The 0.62-stage policy
+  did climb successfully: 6/6 levels, 25% success rate. The earlier failure
+  conclusion was an artifact of 5-episode evaluation.
+- ~~"Increasing amplitude raises the climbing limit."~~ See the table:
+  A=1.0 trained from scratch for 2M steps and performed worse than A=0.7
+  at every setting.
 
-**仍未解释的**：在 0.56 档做微调，**20k 步就把 40% 的策略打到 0/20**，
-在 UTD=1/8 和 UTD=1、旧奖励和新奖励、`target_entropy` −6 和 −12 下**都可复现**。
-`sac` 里唯一始终没变过的共性是"warm start + 50 万条陈旧 buffer + 改了奖励函数"。
+**Still unexplained**: fine-tuning at scale 0.56 takes a policy from 40%
+success to **0/20 in just 20k steps**. This is **reproducible** at UTD=1/8
+and UTD=1, with old and new rewards, and with `target_entropy` -6 and -12.
+The only persistent common factor in `sac` was "warm start + 500k stale
+buffer transitions + changed reward function."
 
 ---
 
-## 8. 在这个仓库里工作的纪律
+## 8. Working Discipline in This Repository
 
-1. **改任何奖励/超参之前，先读第 5 节对应的分类。** 这个仓库的绝大部分损失来自 A 类（静默失效）。
-2. **宣称"X 改善了效果"之前必须有两组同种子、20 回合的对照。** 5 回合的差异全是噪声（D2）。
-3. **一次只改一个变量**，并且把对照的数字写进注释。
-4. **不要为了让指标好看而放宽成功判据或缩短评估**（第 3 节规范 7）。
-5. **长时间训练放后台**（`nohup ... &` + `run_in_background`），
-   但**不要并发跑两个训练**——16 核会被两个 8 环境 + 8 torch 线程的进程互相拖垮。
-6. **训练完先看 `best/best_model.zip`，不是 `model.zip`**（D1）。
-7. **报告失败要给出数字**。这个仓库的注释和 README 里到处是"实测 −376 / −664 / −654"这种
-   原始数字——它们是唯一能防止重复踩坑的东西。
+1. **Before changing any rewards or hyperparameters, read the relevant
+   category in §5.** Most losses here come from category A, silent failures.
+2. **Before claiming an improvement, compare two configurations on the same
+   seeds over 20 episodes each.** Differences from 5 episodes are noise (D2).
+3. **Change only one variable at a time**, and record comparison numbers
+   in comments.
+4. **Do not relax success criteria or shorten evaluation to improve metrics**
+   (coding rule 7 in §3).
+5. **Run long training in the background** (`nohup ... &` + `run_in_background`),
+   but **never run two training jobs concurrently**: on 16 cores, two jobs
+   each using 8 environments + 8 torch threads interfere severely.
+6. **After training, inspect `best/best_model.zip` first, not `model.zip`** (D1).
+7. **Report failures with numbers.** Comments and README contain raw results
+   such as measured -376 / -664 / -654; these are the only reliable way
+   to avoid repeating the same mistakes.

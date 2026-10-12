@@ -36,7 +36,7 @@ class RewardInput:
     terrain_h: float
     prev_terrain_h: float  # 上一步的支撑面高度
     terrain_level: int  # 当前站上第几级台阶（0=还在平地/槛上）
-    prev_terrain_level: int  # 上一步的第几级
+    prev_terrain_level: int  # 本步之前本回合到过的最高级（包含出生级数）
     cmd_vx: float  # 本回合的前进速度指令
     contact_force: float  # 非脚部件与地形的接触法向力之和
     terminated: bool  # 本步是否因为摔倒/成功而终止
@@ -97,7 +97,7 @@ def _level_bonus(r: RewardInput, cfg: RewardCfg) -> float:
 
     climb 是势能增量，只在"跨上台阶沿的那一步"出现一次，很容易被动作噪声淹没；
     台阶数是个**离散**信号，直接告诉策略"你上了一个新高度"，比连续势能好学好认。
-    只涨不跌：掉下台阶不重复扣（掉下去由 climb 项罚），否则一次失误会被连罚两遍。
+    与本回合此前的最高级比较；退下来再上同一级不重复发放，掉下去由 climb 项罚。
     """
     return float(max(0, r.terrain_level - r.prev_terrain_level))
 

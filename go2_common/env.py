@@ -74,7 +74,7 @@ class Go2TerrainEnv(GymEnv):
         # 少了它 progress 项在第一次 step 就 AttributeError。
         self.prev_x = 0.0
         self.prev_terrain_h = 0.0
-        self.prev_terrain_level = 0
+        self.prev_terrain_level = 0  # Highest level reached before the current step.
         self.step_count = 0
 
     # -------------------------------------------------------------- 初始化
@@ -217,6 +217,7 @@ class Go2TerrainEnv(GymEnv):
             "y": y,
             "base_z": float(d.qpos[2]),
             "terrain_h": self.prev_terrain_h,
+            "max_level": self.prev_terrain_level,
             "cmd_vx": self.cmd_vx,
         }
         return self._obs(), info
@@ -278,7 +279,8 @@ class Go2TerrainEnv(GymEnv):
         self.prev_action = action
         self.prev_x = float(base_pos[0])
         self.prev_terrain_h = terrain_h
-        self.prev_terrain_level = terrain_level
+        # Retain the episode maximum: descending must not rearm a level bonus.
+        self.prev_terrain_level = max(self.prev_terrain_level, terrain_level)
 
         info = {
             **parts,
@@ -289,6 +291,7 @@ class Go2TerrainEnv(GymEnv):
             "vx": float(r.base_v[0]),
             "cmd_vx": self.cmd_vx,
             "level": terrain_level,
+            "max_level": self.prev_terrain_level,
             "success": success,
             "is_success": success,  # SB3 的 Monitor 会用它统计
             # reward 分项里的 "success"（权重 20.0）被上面这个布尔值覆盖了，改名另存一份
