@@ -92,6 +92,30 @@ def _climb(r: RewardInput, cfg: RewardCfg) -> float:
     return float(cfg.climb_gamma * r.terrain_h - r.prev_terrain_h)
 
 
+def _level_income(r: RewardInput, cfg: RewardCfg) -> float:
+    """驻级收入：**每步**按当前站上的级数给钱，`level_income × terrain_level`。
+
+    **和 `_climb` 的关键区别：这一项不是望远镜位势。** `_climb` 一局的合计是
+    `h_末 − h_始`，所以"爬上去再掉下来"和"压根不爬"的爬升收入**都恰好是 0**；
+    在爬不上去的高度上（实测 1.00 档），这等于**对"尝试"的边际价值为 0**，
+    而尝试要付碰撞和俯仰的钱 —— 于是"不试"成了严格最优。实测：确定性策略在 1.00 上
+    每局 −5.8 分，其中 `climb` 与 `success_bonus` 两项整项为 0。
+
+    这一项把"站在高处"本身变成持续收入，于是**部分进展**（哪怕只上了第 1 级）
+    从"净 0"变成"净正"，梯度就回来了。代价是它确实是一份"驻级年金"——
+    但它刷不了分：级数由 `terrain.support_height`（四只脚下方地形高度的**中位数**）算出，
+    至少三只脚真的站上去才涨。
+
+    用**级数**而不是**米**：按米计费会把钱发给 x=1.10~1.70 那两个 0.08 m 的槛
+    （1.00 档实测白拿 +172/局，狗本来就爱在槛上蹲着），于是"从槛爬上第 1 级"
+    的真实差价只剩 0.170−0.08 = 0.09 m，被摊薄。按级数计则槛严格是 0 级、收入为 0，
+    而且**不需要任何魔法常数**。
+
+    完整推导与实际数字见修复记录 §7.3~§7.8。
+    """
+    return float(cfg.level_income * r.terrain_level)
+
+
 def _level_bonus(r: RewardInput, cfg: RewardCfg) -> float:
     """每登上一级新台阶给一次性的分。
 
@@ -197,6 +221,7 @@ TERMS = (
     ("progress", _progress),
     ("track_lin_vel", _track_lin_vel),
     ("climb", _climb),
+    ("level_income", _level_income),
     ("level_bonus", _level_bonus),
     ("base_height", _base_height),
     ("lateral", _lateral),

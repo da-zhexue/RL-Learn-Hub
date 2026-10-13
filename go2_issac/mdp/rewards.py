@@ -1,4 +1,4 @@
-"""15 项奖励，一项一个函数，全部转调 `core.term_*`。
+"""16 项奖励，一项一个函数，全部转调 `core.term_*`。
 
 **这里不写任何公式**：每项一行 `return core.term_xxx(...)`。Isaac 的奖励管理器做的是
 "权重 × 函数值，再求和"，`go2_common/reward.py` 的 `compute_reward` 做的也是同一件事，
@@ -74,6 +74,13 @@ def reward_climb(env):
     """爬升：地形势能增量（用地形高度，不用机身高度）。"""
     cfg, st = _r(env)
     return core.term_climb(st, cfg)
+
+
+@_per_step
+def reward_level_income(env):
+    """驻级收入：每步按当前级数给钱（**不是望远镜位势**）。"""
+    cfg, st = _r(env)
+    return core.term_level_income(st, cfg)
 
 
 @_per_step
@@ -182,6 +189,7 @@ TERMS: dict[str, object] = {
     "progress": reward_progress,
     "track_lin_vel": reward_track_lin_vel,
     "climb": reward_climb,
+    "level_income": reward_level_income,
     "level_bonus": reward_level_bonus,
     "base_height": reward_base_height,
     "lateral": reward_lateral,

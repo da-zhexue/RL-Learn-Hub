@@ -222,6 +222,12 @@ def parse_args(argv=None):
     p.add_argument("--terrain-scale", type=float, default=None, metavar="S",
                    help="地形高度整体缩放（课程用）：0.3 / 0.6 / 1.0 逐级长高，1.0=原场景，0=平地。"
                         "x/y 脚印不变，只压矮高度")
+    p.add_argument("--terrain-scale-range", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                   help="多尺度混合：每个 worker 分一个 [LO,HI] 内的固定 scale（黄金比低差异铺开），"
+                        "replay buffer 里同时有不同高度的台阶，用来打掉"
+                        "'在哪档练就只在哪档变好'的单档特化（修复记录 §6.8）。"
+                        "--terrain-scale 仍是标称值和评估尺子的口径，必须一起给。"
+                        "评估环境永远钉死单一尺度，选模 key 不受影响")
     p.add_argument("--action-scale", type=float, default=None, metavar="A",
                    help="关节目标幅度，决定能跨多高的槛。续训时必须显式给，否则沿用 checkpoint 的值（见 AGENT.md §5-A2）")
     p.add_argument("--learning-rate", type=float, default=None, metavar="LR",
@@ -286,6 +292,8 @@ def main(argv=None):
             env_cfg.reset_frac_stair = min(max(float(args.reset_frac_stair), 0.0), 1.0)
         if args.terrain_scale is not None:
             env_cfg.terrain_scale = args.terrain_scale
+        if args.terrain_scale_range is not None:
+            env_cfg.terrain_scale_range = tuple(args.terrain_scale_range)
         if args.action_scale is not None:
             env_cfg.action_scale = args.action_scale
         print(f"  续训自 {resume_path}")
@@ -304,12 +312,17 @@ def main(argv=None):
             env_cfg.reset_frac_stair = min(max(float(args.reset_frac_stair), 0.0), 1.0)
         if args.terrain_scale is not None:
             env_cfg.terrain_scale = args.terrain_scale
+        if args.terrain_scale_range is not None:
+            env_cfg.terrain_scale_range = tuple(args.terrain_scale_range)
         if args.action_scale is not None:
             env_cfg.action_scale = args.action_scale
         reward_cfg = RewardCfg()
 
     # 课程缩放的档位写进目录名，免得同一个地形下 s0.6 和 s1 的模型混在一起分不清
     scale_tag = "" if env_cfg.terrain_scale == 1.0 else f"_s{env_cfg.terrain_scale:g}"
+    if env_cfg.terrain_scale_range:
+        lo, hi = env_cfg.terrain_scale_range
+        scale_tag += f"_mix{lo:g}-{hi:g}"
     run_dir = (
         pathlib.Path(args.save_dir)
         if args.save_dir
@@ -388,7 +401,9 @@ def main(argv=None):
             {"env": to_jsonable(env_cfg), "reward": to_jsonable(reward_cfg), "train": to_jsonable(train_cfg)},
             f, indent=2, ensure_ascii=False,
         )
-    print(f"地形={env_cfg.terrain}(scale={env_cfg.terrain_scale:g})  action_scale={env_cfg.action_scale:g}  "
+    print(f"地形={env_cfg.terrain}(scale={env_cfg.terrain_scale:g}"
+          + (f", worker 混合 {env_cfg.terrain_scale_range}" if env_cfg.terrain_scale_range else "")
+          + f")  action_scale={env_cfg.action_scale:g}  "
           f"观测维度={obs_dim(env_cfg.privileged, env_cfg.scan)}"
           f"{'(含 16 维地形扫描)' if env_cfg.scan else ''}  "
           f"环境数={args.n_envs}  总步数={args.steps:,}  输出目录={run_dir}")

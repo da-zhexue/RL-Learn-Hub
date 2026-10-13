@@ -67,9 +67,34 @@ def best_metric_payload(key, metrics, num_timesteps, protocol) -> dict:
     }
 
 
+def worker_scale(env_cfg: EnvCfg, seed: int) -> float:
+    """这个 worker 该用哪个 terrain_scale。
+
+    `terrain_scale_range` 为 None（默认）时原样返回 `cfg.terrain_scale`，**不消耗任何
+    RNG、不做任何浮点运算**，所以旧行为的逐位可复现性不受影响。
+
+    区间给定时用**黄金比低差异序列**分配，不用随机抽签：worker 数 8 时 8 个采样点在整个
+    区间上近似等距（随机抽签会挤堆，可能 8 个点全落在半边上）。而且同一个 seed 永远给同一个
+    scale —— 换 seed 换布局、固定 seed 完全可复现。
+    """
+    rng_range = getattr(env_cfg, "terrain_scale_range", None)
+    if not rng_range:
+        return float(env_cfg.terrain_scale)
+    lo, hi = (float(v) for v in rng_range)
+    if not (0.0 <= lo <= hi):
+        raise ValueError(f"terrain_scale_range 必须是 0 <= lo <= hi，收到 {rng_range!r}")
+    u = (int(seed) * 0.6180339887498949) % 1.0  # 1/φ，连续整数 seed 的相位均匀铺开
+    return lo + (hi - lo) * u
+
+
 def make_env(env_cfg: EnvCfg, reward_cfg: RewardCfg, seed: int):
     """环境工厂。必须是模块级函数并配 functools.partial —— SubprocVecEnv 要 pickle 它，
     闭包 lambda 容易在这里翻车。"""
+    scale = worker_scale(env_cfg, seed)
+    if scale != env_cfg.terrain_scale:
+        # 必须走 replace()：Go2TerrainEnv.__init__ 会把 cfg.goal_z 改写成本地形算出来的值
+        # （env.py），共用一份对象会让各 worker 互相串。
+        env_cfg = replace(env_cfg, terrain_scale=scale)
     env = Go2TerrainEnv(env_cfg, reward_cfg)
     env = Monitor(env)
     env.reset(seed=seed)
@@ -109,6 +134,11 @@ class EvalMetricsCallback(BaseCallback):
         def _mk(scale):
             cfg = replace(env_cfg)
             cfg.reset_frac_stair = 0.0
+            # 训练侧的 worker 尺度是 train_utils.worker_scale 在 make_env 里现算的，
+            # 根本不过 EnvCfg.terrain_scale_range 这条路；这里显式清掉只是防线：
+            # 将来要是把混合搬到 env.reset() 里逐回合抽（per-episode 重建），
+            # 忘了清就会让评估尺子随回合乱跳，选模 key 静默失去可比性。
+            cfg.terrain_scale_range = None
             cfg.terrain_scale = float(scale)
             return Go2TerrainEnv(cfg, reward_cfg)
 

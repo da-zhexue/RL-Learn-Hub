@@ -19,12 +19,17 @@ from stable_baselines3.common.logger import configure
 from go2_common.config import EnvCfg, RewardCfg, obs_dim
 from go2_sac.config import TrainCfg
 from go2_common.env import Go2TerrainEnv
+from go2_common.reward import RewardInput
+from go2_common.reward import _climb as _climb_impl
+from go2_common.reward import _level_income as _level_income_impl
 from go2_common.train_utils import (
     EvalMetricsCallback,
     checkpoint_obs_dim,
+    make_env,
     pad_replay_buffer,
     task_key,
     warm_start_scan,
+    worker_scale,
 )
 from go2_issac import core
 from go2_issac.tests.core_parity import synthetic_state, to_core_state
@@ -668,11 +673,6 @@ class ScanTests(unittest.TestCase):
             self.assertEqual(padded_size, 16)
 
 
-if __name__ == "__main__":
-    torch.set_num_threads(1)
-    unittest.main()
-
-
 class BestModelKeyTests(unittest.TestCase):
     """选模判据的回归测试。实测背景：full 阶段按 eval/mean_reward 取极大值，
     选中的是"冲 1.8 m 就地翻滚"（20/20 摔倒，+172.3），而同一批评估里真有进展的
@@ -705,3 +705,172 @@ class BestModelKeyTests(unittest.TestCase):
         a = task_key(0, 1.0, 2.0, 10.0, goal)
         b = task_key(0, 1.0, 2.0, 10.04, goal)  # 第四项 round 到 0.1 后相同
         self.assertEqual(a, b)  # 严格 > 比较下不会反复覆盖 best_model
+
+
+class TerrainScaleMixTests(unittest.TestCase):
+    """多尺度混合（--terrain-scale-range）：分配规则、旧行为不变、评估尺子不被污染。"""
+
+    def test_none_range_is_the_old_value_bit_for_bit(self):
+        # 旧行为必须逐位不变：range=None 时连浮点运算都不能做，否则历史 run 的可复现性没了
+        cfg = EnvCfg(terrain="full", terrain_scale=0.8)
+        for seed in (0, 1, 7, 12345):
+            self.assertEqual(worker_scale(cfg, seed), 0.8)
+        self.assertIsNone(cfg.terrain_scale_range)
+
+    def test_range_spreads_workers_over_the_whole_interval(self):
+        lo, hi = 0.76, 0.90
+        cfg = EnvCfg(terrain="full", terrain_scale=0.80, terrain_scale_range=(lo, hi))
+        scales = [worker_scale(cfg, seed + i) for i, seed in enumerate([0] * 8)]
+        self.assertTrue(all(lo <= s <= hi for s in scales), scales)
+        # 黄金比低差异铺开：8 个点必须覆盖到区间的 80% 以上（随机抽签经常只覆盖一半）
+        self.assertGreater((max(scales) - min(scales)) / (hi - lo), 0.80)
+
+    def test_same_seed_same_scale(self):
+        cfg = EnvCfg(terrain="full", terrain_scale=0.80, terrain_scale_range=(0.76, 0.90))
+        self.assertEqual(worker_scale(cfg, 12345), worker_scale(cfg, 12345))
+        self.assertNotEqual(worker_scale(cfg, 12345), worker_scale(cfg, 12346))
+
+    def test_rejects_inverted_or_negative_range(self):
+        for bad in ((0.9, 0.8), (-0.1, 0.5)):
+            cfg = EnvCfg(terrain="full", terrain_scale_range=bad)
+            with self.assertRaises(ValueError):
+                worker_scale(cfg, 0)
+
+    def test_list_from_config_json_still_works(self):
+        # asdict/JSON 往返会把 tuple 变成 list（reset_x 有同样的先例），必须照样能吃
+        cfg = EnvCfg(terrain="full", terrain_scale=0.80, terrain_scale_range=[0.76, 0.90])
+        self.assertTrue(0.76 <= worker_scale(cfg, 3) <= 0.90)
+
+    def test_make_env_builds_the_assigned_scale(self):
+        cfg = EnvCfg(terrain="full", terrain_scale=0.80, terrain_scale_range=(0.76, 0.90))
+        env = make_env(cfg, RewardCfg(), seed=5)
+        self.addCleanup(env.close)
+        want = worker_scale(cfg, 5)
+        # cfg 被 make_env 复制过（goal_z 会被 env 改写），所以原 cfg 不受影响
+        self.assertEqual(cfg.terrain_scale, 0.80)
+        got = env.unwrapped.cfg.terrain_scale
+        self.assertAlmostEqual(got, want, places=12)
+        # 地形真的按这个 scale 建出来了，不是只改了 cfg 字段
+        tops = [round(t, 4) for t in env.unwrapped.terrain.stair_tops]
+        self.assertEqual(tops, [round(scale * got, 4) for scale in (0.17, 0.32, 0.47, 0.62, 0.77, 0.92)])
+
+    def test_eval_ruler_is_pinned_to_a_single_scale(self):
+        # 训练侧有混合时，评估环境绝不能被带着跑 —— 否则选模 key 跨 run 不可比
+        cfg = EnvCfg(terrain="full", terrain_scale=0.80, terrain_scale_range=(0.76, 0.90))
+        with TemporaryDirectory() as tmp:
+            callback = EvalMetricsCallback(cfg, RewardCfg(), eval_freq=1, n_episodes=1, save_dir=tmp)
+            self.addCleanup(callback.eval_env.close)
+            got = callback.eval_env.cfg
+            self.assertIsNone(got.terrain_scale_range)
+            self.assertEqual(got.terrain_scale, 0.80)
+            self.assertEqual(callback._protocol()["terrain_scale"], 0.80)
+
+
+
+class LevelIncomeTests(unittest.TestCase):
+    """`level_income` 必须真的是"非望远镜位势"—— 这正是 §7.4 那个病的药。
+
+    背景（2026-10-13，修复记录 §7.3~§7.8）：`climb` 一局的合计是 `h_末 − h_始`。
+    在爬得上去的高度上没问题；但在能力边界之上，"爬上去→掉下来"的净高度变化恰好是 0，
+    于是 `climb` 项**整项为 0**（实测 1.00 档 20 局），`success_bonus` 也是 0，
+    而"去试"要付 collision+orientation。→ "不试"成了严格最优，且因为观测里没有地形信息，
+    这个"别试"会无条件地扩散到邻档 —— R9~R19 每次坍缩、以及"当档特化"的统一机制。
+
+    按**级数**计价而不是按**米**：第一版写的是 `height_income × terrain_h`，
+    evalx 实测 1.00 档上 20 局白拿 +172/局——钱大多是在 x=1.10~1.70 那两个
+    0.08 m 的**槛**上蹲着领的（狗本来就爱蹲槛）。`level_at_height(0.08) = 0`
+    是定义使然（第一个 top 是 0.170），所以按级数计门槛严格发 0，
+    且"从槛爬上第 1 级"的差价不被摊薄、也不需要任何魔法常数。
+    """
+
+    @staticmethod
+    def _input(h: float, prev_h: float, lvl: int = 0, prev_lvl: int = 0):
+        z = np.zeros(12)
+        return RewardInput(
+            action=z, prev_action=z, q=z, dq=z, tau=z,
+            quat=np.array([1.0, 0.0, 0.0, 0.0]),
+            base_v=np.zeros(3), base_w=np.zeros(3),
+            base_pos=np.array([0.0, 0.0, h + 0.27]),
+            prev_x=0.0, terrain_h=float(h), prev_terrain_h=float(prev_h),
+            terrain_level=int(lvl), prev_terrain_level=int(prev_lvl),
+            cmd_vx=0.0, contact_force=0.0, terminated=False, success=False,
+        )
+
+    @staticmethod
+    def _walk(steps):
+        """`steps` = [(支撑面高度, 级数), ...] 逐帧走一遍，返回 (Σ climb, Σ level_income)。"""
+        cfg = RewardCfg()
+        prev_h = steps[0][0]
+        sc = si = 0.0
+        for h, lvl in steps:
+            r = LevelIncomeTests._input(h, prev_h, lvl)
+            sc += _climb_impl(r, cfg)
+            si += _level_income_impl(r, cfg)
+            prev_h = h
+        return sc, si
+
+    #: 平地 100 步 → 第 1 级(0.170) 300 步 → 掉回平地 100 步。
+    #: 这正是"爬上去又掉下来"，测得 1.00 档上每局都在发生的形态。
+    _FAILED_ATTEMPT = [(0.0, 0)] * 100 + [(0.170, 1)] * 300 + [(0.0, 0)] * 100
+
+    def test_climb_is_telescoping_so_a_failed_attempt_nets_zero(self):
+        s_climb, _ = self._walk(self._FAILED_ATTEMPT)
+        # 这正是"病"：爬上去再掉下来，climb 一分钱没挣到（h_末 − h_始 = 0）
+        self.assertAlmostEqual(s_climb, 0.0, places=9)
+
+    def test_level_income_makes_the_same_attempt_pay(self):
+        _, s_income = self._walk(self._FAILED_ATTEMPT)
+        # 300 步 × 1 级 × 权重（与级数线性，平地严格为 0）
+        self.assertAlmostEqual(s_income, float(RewardCfg().level_income) * 300, places=9)
+        self.assertGreater(s_income, 0.0)
+
+    def test_menkan_pays_nothing(self):
+        """0.08 m 的槛必须是 0 级、收入必须为 0 —— 这是弃用"按米计价"的唯一理由。"""
+        env = Go2TerrainEnv(EnvCfg(terrain="full", terrain_scale=1.00), RewardCfg())
+        self.addCleanup(env.close)
+        menkan = 0.08 * 1.00
+        self.assertEqual(env.terrain.level_at_height(menkan), 0)
+        # 第一级台阶(0.170)才是 1 级，所以"从槛爬到第 1 级"的差价是满额 1 级
+        self.assertEqual(env.terrain.level_at_height(0.170), 1)
+        cfg = RewardCfg()
+        got = _level_income_impl(self._input(menkan, menkan, 0), cfg)
+        self.assertEqual(got, 0.0)
+
+    def test_income_is_zero_when_the_knob_is_off(self):
+        # 旋钮归零 = 旧行为：两条路都恒为 0，差价仍然是塌的
+        cfg = RewardCfg(level_income=0.0)
+        total = 0.0
+        for h, lvl in self._FAILED_ATTEMPT:
+            total += _level_income_impl(LevelIncomeTests._input(h, h, lvl), cfg)
+        self.assertEqual(total, 0.0)
+
+    def test_income_is_linear_in_level_and_never_negative(self):
+        cfg = RewardCfg(level_income=0.4)
+        for lvl in (0, 1, 2, 3, 4, 5, 6):
+            got = _level_income_impl(LevelIncomeTests._input(0.92, 0.92, lvl), cfg)
+            self.assertAlmostEqual(got, 0.4 * lvl, places=12)
+            self.assertGreaterEqual(got, 0.0)
+
+    def test_term_is_registered_in_the_shared_pricing(self):
+        from go2_common.reward import TERMS
+        names = [n for n, _ in TERMS]
+        self.assertIn("level_income", names)
+        # 紧挨着 climb —— 三项名字/顺序的唯一真源是这里，Isaac 侧靠断言同步
+        self.assertEqual(names.index("level_income"), names.index("climb") + 1)
+
+    def test_default_pricing_is_actually_on(self):
+        # 默认值必须非 0，否则"修好了"只是错觉
+        self.assertGreater(RewardCfg().level_income, 0.0)
+
+    def test_env_emits_the_term_every_step(self):
+        env = Go2TerrainEnv(EnvCfg(terrain="full", terrain_scale=0.80), RewardCfg())
+        self.addCleanup(env.close)
+        env.reset(seed=0)
+        obs, r, term, trunc, info = env.step(np.zeros(env.action_space.shape, dtype=np.float32))
+        self.assertIn("level_income", info)
+        self.assertAlmostEqual(info["level_income"],
+                               RewardCfg().level_income * env.support_level(), places=9)
+
+if __name__ == "__main__":
+    torch.set_num_threads(1)
+    unittest.main()

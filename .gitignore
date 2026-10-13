@@ -16,3 +16,4 @@ core.*
 **.etli
 tmp.sh
 修复记录**
+**.pid

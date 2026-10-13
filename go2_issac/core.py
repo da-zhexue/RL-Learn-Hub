@@ -332,6 +332,11 @@ def term_climb(st: State, cfg: RewardCfg) -> torch.Tensor:
     return cfg.climb_gamma * st.terrain_h - st.prev_terrain_h
 
 
+def term_level_income(st: State, cfg: RewardCfg) -> torch.Tensor:
+    """驻级收入：每步按当前级数给钱。**不是望远镜位势**，理由见 reward._level_income。"""
+    return cfg.level_income * st.terrain_level
+
+
 def term_level_bonus(st: State, cfg: RewardCfg) -> torch.Tensor:
     """每登上一级新台阶的一次性奖励。只涨不跌（掉下来由 climb 罚）。"""
     return torch.clamp(st.terrain_level - st.prev_terrain_level, min=0).to(F64)
@@ -399,6 +404,7 @@ TERMS = (
     ("progress", term_progress),
     ("track_lin_vel", term_track_lin_vel),
     ("climb", term_climb),
+    ("level_income", term_level_income),
     ("level_bonus", term_level_bonus),
     ("base_height", term_base_height),
     ("lateral", term_lateral),
