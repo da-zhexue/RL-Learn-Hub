@@ -94,6 +94,20 @@ class TerrainHeight:
                 h = top
         return h
 
+    def heights(self, xs, ys) -> np.ndarray:
+        """**一批点**的地形高度，向量化。语义和逐点调 `top()` 完全一致。
+
+        给观测里的前方扫描用：每一步要问 16 个点，逐个 `top()` 是 16×方块数的
+        Python 循环（实测会明显拖慢训练），这里按方块做一遍 numpy 掩码就够。
+        """
+        xs = np.asarray(xs, dtype=np.float64)
+        ys = np.asarray(ys, dtype=np.float64)
+        h = np.zeros(xs.shape, dtype=np.float64)
+        for x_lo, x_hi, y_lo, y_hi, top in self.boxes:
+            inside = (xs >= x_lo) & (xs <= x_hi) & (ys >= y_lo) & (ys <= y_hi)
+            np.maximum(h, top, out=h, where=inside)
+        return h
+
     def top_footprint(self, x: float, y: float = 0.0,
                       half_x: float = 0.24, half_y: float = 0.12) -> float:
         """身体脚印范围内的**最大**地形高度。出生点必须用这个，不能用中心点的高度。

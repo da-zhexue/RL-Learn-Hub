@@ -16,9 +16,16 @@ from gymnasium import spaces
 from stable_baselines3 import SAC
 from stable_baselines3.common.logger import configure
 
-from go2_common.config import EnvCfg, RewardCfg
+from go2_common.config import EnvCfg, RewardCfg, obs_dim
+from go2_sac.config import TrainCfg
 from go2_common.env import Go2TerrainEnv
-from go2_common.train_utils import EvalMetricsCallback
+from go2_common.train_utils import (
+    EvalMetricsCallback,
+    checkpoint_obs_dim,
+    pad_replay_buffer,
+    task_key,
+    warm_start_scan,
+)
 from go2_issac import core
 from go2_issac.tests.core_parity import synthetic_state, to_core_state
 from go2_sac.train import (
@@ -197,7 +204,8 @@ class LevelBonusTests(unittest.TestCase):
             with patch.object(env, "_support_height", side_effect=heights), \
                     patch("go2_common.env.mujoco.mj_step"):
                 infos = [env.step(np.zeros(12))[-1] for _ in heights]
-            self.assertEqual([i["level_bonus"] for i in infos], [5, 5, 0, 0, 5])
+            bonus = RewardCfg().level_bonus  # 权重会被调（2026-10-12 climb/level_bonus 都提过），判据本身不变
+            self.assertEqual([i["level_bonus"] for i in infos], [bonus, bonus, 0, 0, bonus])
             self.assertEqual([i["level"] for i in infos], [1, 2, 1, 2, 3])
             self.assertEqual([i["max_level"] for i in infos], [1, 2, 2, 2, 3])
             self.assertEqual(env.prev_terrain_level, 3)
@@ -207,7 +215,7 @@ class LevelBonusTests(unittest.TestCase):
             env.data.qpos[2] = 1.2
             with patch.object(env, "_support_height", return_value=tops[0]), \
                     patch("go2_common.env.mujoco.mj_step"):
-                self.assertEqual(env.step(np.zeros(12))[-1]["level_bonus"], 5)
+                self.assertEqual(env.step(np.zeros(12))[-1]["level_bonus"], RewardCfg().level_bonus)
         finally:
             env.close()
 
@@ -258,6 +266,102 @@ class LevelBonusTests(unittest.TestCase):
         np.testing.assert_array_equal(env._course_prev["prev_terrain_level"].numpy(), [0, 4, 0])
 
 
+class StairPricingTests(unittest.TestCase):
+    """把"老实爬"和"放弃"两条路的差价钉在这里（2026-10-13）。
+
+    背景：0.78~0.80 上七次训练（R5/R6/R7/R10/R11/R12/R13）最后都退化成
+    "冲几步就翻滚"。`python -m go2_sac.diag reward` 逐项拆开后发现
+    **这不是优化失败**，而是两条路的**折现**差价塌了——见下面 _discounted 的注释。
+
+    数据是**实测的"去权重"每回合分项原始量**（weight=1 时的量），来源是
+    `go2_sac.diag reward <模型> <scale>`，各 6 回合，取自 `s076/best`（老实爬）
+    与 `s080`（退化后的产物）。**存原始量而不是加权分**，是为了让这条测试
+    **跟着 RewardCfg 的权重走**：谁把权重调回塌缩带的老值，这里就会红。
+    """
+
+    # (每回合步数, 去权重的每回合分项)。s076/best @0.80：前进 1.505 m、升 0.389 m、4.33 级。
+    HONEST_080 = (537, {
+        "progress": 1.5048,
+        "track_lin_vel": 97.53,
+        "climb": 0.38867,
+        "level_bonus": 4.33333,
+        # 这一项存的是**登顶次数**（不是 reward 分项，见 env.py:326-329 的名字冲突）。
+        # 6 回合样本里恰好 0 次登顶，n 太小（p≈4.7%）；改用 20 局扫描的 8/20 = 0.4。
+        "success": 0.4,
+        "base_height": 5.77778,
+        "lateral": 0.0,
+        "lateral_vel": 15.48667,
+        "orientation": 31.9,
+        "yaw": 27.0,
+        "yaw_rate": 148.1333,
+        "action_rate": 478.6667,
+        "torques": 402500.0,
+        "collision": 12458.33,
+        "fall": 0.5,
+    })
+    # s080 退化后 @0.80：前进 1.212 m、升 0.163 m、1.17 级、**从不登顶**。
+    GIVEUP_080 = (153, {
+        "progress": 1.212,
+        "track_lin_vel": 72.11667,
+        "climb": 0.162667,
+        "level_bonus": 1.166667,
+        "success": 0.0,
+        "base_height": 3.05556,
+        "lateral": 0.0,
+        "lateral_vel": 4.38333,
+        "orientation": 15.06667,
+        "yaw": 3.56667,
+        "yaw_rate": 61.66667,
+        "action_rate": 202.0,
+        "torques": 144166.7,
+        "collision": 3875.0,
+        "fall": 1.0,
+    })
+
+    @staticmethod
+    def _discounted(arc, cfg: RewardCfg, gamma: float) -> float:
+        """把"每回合净分"按 `gamma` 折现成 SAC 真正在优化的那个量。
+
+        **这一步不能省。** 只比"每回合净分"会得出错误结论：老实爬挣得多，
+        但它要 537 步才挣完，而放弃只要 153 步。SAC 优化的是折现回报
+        G = r·(1−γ^N)/(1−γ)（每步 r 恒定、末步价值 0），
+        `gamma=0.995` 的有效视野只有 200 步——**老实爬后半段的收入基本被打折打没了**。
+
+        这条判据被**唯一已知"学得动"的那一档**验证过：0.76 旧定价下
+        老实爬 +153.1 对放弃 +146.8（仅 +4.3%），而那一档 R4/R8/R9 都学会了。
+        所以"折现后略微领先"就是够的，判据不用留太大余量。
+        """
+        steps, raw = arc
+        total = sum(getattr(cfg, name) * value for name, value in raw.items())
+        rate = total / steps
+        return rate * (1.0 - gamma**steps) / (1.0 - gamma)
+
+    def test_honest_climb_beats_giving_up_at_the_collapse_band_scale(self):
+        cfg, gamma = RewardCfg(), TrainCfg.gamma
+        honest = self._discounted(self.HONEST_080, cfg, gamma)
+        giveup = self._discounted(self.GIVEUP_080, cfg, gamma)
+        self.assertGreater(
+            honest, giveup,
+            f"折现后：老实爬 {honest:.1f} vs 放弃 {giveup:.1f}"
+            f"（{honest / giveup:.2f} 倍，{(honest / giveup - 1) * 100:+.1f}%）——"
+            f"跌回 1 倍以下就是把策略推向'少活一会儿'，调权重时要盯住这条",
+        )
+
+    def test_a_failed_attempt_still_beats_giving_up(self):
+        """一次都不登顶时也必须还是老实爬划算——否则"敢去试"会被掐掉。
+
+        失败尝试的摔倒率实测 45~95%，所以这条不能只靠 `success` 一项撑着。
+        """
+        cfg, gamma = RewardCfg(), TrainCfg.gamma
+        honest_no_success = (self.HONEST_080[0], dict(self.HONEST_080[1], success=0.0))
+        # 登顶次数置 0 后老实爬会输（这就是 `success` 权重必须给足的理由），
+        # 所以这里比的是**每回合净分**：它是"敢去试"的下限判据。
+        self.assertGreater(
+            sum(getattr(cfg, k) * v for k, v in honest_no_success[1].items()),
+            sum(getattr(cfg, k) * v for k, v in self.GIVEUP_080[1].items()),
+        )
+
+
 class EvaluationTests(unittest.TestCase):
     def test_peak_level_survives_descent_and_is_reset_per_episode(self):
         with TemporaryDirectory() as tmp:
@@ -265,7 +369,7 @@ class EvaluationTests(unittest.TestCase):
                                            eval_freq=1, n_episodes=2, save_dir=tmp)
             self.addCleanup(callback.eval_env.close)
             callback.num_timesteps = 1
-            callback.best_reward = np.inf
+            callback.best_key = (10**9,) * 4  # 大到不可能被超越：这些用例只验指标，不验存盘
             logger = configure(folder=tmp, format_strings=[])
             callback.model = SimpleNamespace(logger=logger)
             episode_levels = iter(([0, 2, 1, 0], [0, 1, 0]))
@@ -299,7 +403,7 @@ class EvaluationTests(unittest.TestCase):
                                            eval_freq=1, n_episodes=1, save_dir=tmp)
             self.addCleanup(callback.eval_env.close)
             callback.num_timesteps = 1
-            callback.best_reward = np.inf
+            callback.best_key = (10**9,) * 4  # 大到不可能被超越：这些用例只验指标，不验存盘
             logger = configure(folder=tmp, format_strings=[])
             callback.model = SimpleNamespace(logger=logger)
 
@@ -367,6 +471,237 @@ class TrainingEntryTests(unittest.TestCase):
                 self.assertTrue(torch.equal(value, repaired.policy.state_dict()[key]))
 
 
+class ScanTests(unittest.TestCase):
+    """前方地形高度扫描（`--scan`）和它的暖启动。
+
+    这里的核心断言只有一条：**扩维之后策略和扩维之前逐位一致**
+    （见 `train_utils.warm_start_scan`）。没有这一条，暖启动就等于随机重新初始化，
+    那还不如从头训——整个"给观测加信息"的方案就不成立了。
+    """
+
+    def test_heights_matches_pointwise_top(self):
+        """向量化的 heights() 必须和逐点 top() 完全相同（这是它唯一的安全性论据）。"""
+        env = Go2TerrainEnv(EnvCfg(terrain="full", terrain_scale=0.76))
+        try:
+            rng = np.random.default_rng(0)
+            xs = rng.uniform(-0.5, 4.0, 800)
+            ys = rng.uniform(-0.5, 0.5, 800)
+            ref = np.array([env.terrain.top(float(x), float(y)) for x, y in zip(xs, ys)])
+            np.testing.assert_array_equal(ref, env.terrain.heights(xs, ys))
+        finally:
+            env.close()
+
+    def test_obs_dim_combinations(self):
+        self.assertEqual(obs_dim(), 47)
+        self.assertEqual(obs_dim(True), 48)
+        self.assertEqual(obs_dim(False, True), 63)
+        self.assertEqual(obs_dim(True, True), 64)
+
+    def test_scan_obs_is_zero_on_flat_ground(self):
+        """出生在 x=-0.8（前方连 0.06 m 的槛都没有）时，扫描必须逐点全 0。
+
+        注意不能随便挑个"离台阶远"的点：场景里 x=1.10~1.70 还有两个门槛
+        （见 terrain.py 开头），x=0.3 就能扫到它们。
+        """
+        env = Go2TerrainEnv(EnvCfg(terrain="full", terrain_scale=0.76, scan=True))
+        try:
+            self.assertEqual(env.observation_space.shape, (63,))
+            env.cfg.reset_x = (-0.8, -0.8)
+            env.cfg.reset_frac_stair = 0.0
+            obs, _ = env.reset(seed=7)
+            self.assertEqual(obs.shape, (63,))
+            np.testing.assert_array_equal(obs[47:], np.zeros(16, np.float32))
+        finally:
+            env.close()
+
+    def test_warm_start_scan_keeps_policy_identical(self):
+        """47 维 checkpoint 扩成 63 维后，新 16 维填 0 时输出必须与原来一致。"""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_path = root / "old"
+            old = SAC(
+                "MlpPolicy",
+                Go2TerrainEnv(EnvCfg(terrain="flat", max_episode_s=0.02)),
+                device="cpu",
+                seed=0,
+                policy_kwargs=dict(net_arch=[64, 64]),
+            )
+            old.save(str(old_path))
+            self.assertEqual(checkpoint_obs_dim(old_path), 47)
+
+            new_path = warm_start_scan(old_path, root / "new.zip", 63)
+            self.assertEqual(checkpoint_obs_dim(new_path), 63)
+
+            env63 = Go2TerrainEnv(EnvCfg(terrain="flat", max_episode_s=0.02, scan=True))
+            try:
+                warmed = SAC.load(str(new_path), env=env63, device="cpu")
+            finally:
+                env63.close()
+
+            # 权重层面是**精确**的：新增列就是 0，旧列原封不动
+            old_sd, new_sd = old.policy.state_dict(), warmed.policy.state_dict()
+            self.assertTrue(
+                torch.equal(new_sd["actor.latent_pi.0.weight"][:, :47],
+                            old_sd["actor.latent_pi.0.weight"])
+            )
+            self.assertTrue(
+                torch.equal(new_sd["actor.latent_pi.0.weight"][:, 47:],
+                            torch.zeros_like(new_sd["actor.latent_pi.0.weight"][:, 47:]))
+            )
+            # critic 的新列插在**动作列之前**（SB3 吃的是 [obs, action] 拼接）
+            for q in ("critic.qf0.0.weight", "critic.qf1.0.weight", "critic_target.qf0.0.weight"):
+                self.assertTrue(torch.equal(new_sd[q][:, :47], old_sd[q][:, :47]), q)
+                self.assertTrue(torch.equal(new_sd[q][:, 63:], old_sd[q][:, 47:]), q)
+                self.assertTrue(torch.equal(new_sd[q][:, 47:63], torch.zeros_like(new_sd[q][:, 47:63])), q)
+
+            # 输出层面允许 1e-6 的浮点噪声：数学恒等是精确的，但多出来的 16 个零项
+            # 会改变 BLAS 的累加顺序（实测这台机器上差值是 0.0，但不能依赖它）
+            obs47 = np.random.default_rng(0).normal(size=(32, 47)).astype(np.float32)
+            obs63 = np.concatenate([obs47, np.zeros((32, 16), np.float32)], axis=1)
+            a47 = np.array([old.predict(o, deterministic=True)[0] for o in obs47])
+            a63 = np.array([warmed.predict(o, deterministic=True)[0] for o in obs63])
+            self.assertLess(float(np.abs(a47 - a63).max()), 1e-6)
+            with torch.no_grad():
+                q47 = old.critic(torch.as_tensor(obs47), torch.as_tensor(a47))[0]
+                q63 = warmed.critic(torch.as_tensor(obs63), torch.as_tensor(a47))[0]
+            self.assertLess(float((q47 - q63).abs().max()), 1e-6)
+
+    def test_warm_start_scan_rejects_wrong_dims(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = SAC(
+                "MlpPolicy",
+                Go2TerrainEnv(EnvCfg(terrain="flat", max_episode_s=0.02)),
+                device="cpu",
+                seed=0,
+                policy_kwargs=dict(net_arch=[64, 64]),
+            )
+            old.save(str(root / "old"))
+            with self.assertRaisesRegex(ValueError, "不需要暖启动"):
+                warm_start_scan(root / "old", root / "a.zip", 47)
+            with self.assertRaisesRegex(ValueError, "方向反了"):
+                warm_start_scan(root / "old", root / "b.zip", 32)
+
+    def test_pad_replay_buffer_keeps_experience_and_zero_fills(self):
+        """补齐 buffer：旧数据一条不丢，新增列全 0，超时标签保留。"""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = Go2TerrainEnv(EnvCfg(terrain="flat", max_episode_s=0.02))
+            try:
+                model = SAC("MlpPolicy", env, device="cpu", seed=0,
+                            buffer_size=32, learning_starts=0,
+                            policy_kwargs=dict(net_arch=[64, 64]))
+                model.learn(16, progress_bar=False)
+            finally:
+                env.close()
+            old_path = root / "old.pkl"
+            model.save_replay_buffer(old_path)
+            old = model.replay_buffer
+            self.assertEqual(old.observations.shape[-1], 47)
+            n = old.size()
+            self.assertGreater(n, 0)
+
+            new_path = pad_replay_buffer(old_path, root / "new.pkl", 63)
+            with open(new_path, "rb") as f:
+                import pickle
+
+                new = pickle.load(f)
+            self.assertEqual(new.observations.shape[-1], 63)
+            self.assertEqual(new.size(), n)
+            self.assertTrue(new.handle_timeout_termination)
+            self.assertEqual(new.observations.shape[:-1], old.observations.shape[:-1])
+            # 旧列原样、新列全 0（observations 和 next_observations 都要）
+            for attr in ("observations", "next_observations"):
+                np.testing.assert_array_equal(getattr(new, attr)[..., :47], getattr(old, attr))
+                np.testing.assert_array_equal(
+                    getattr(new, attr)[..., 47:], np.zeros(new.observations.shape[:-1] + (16,), np.float32)
+                )
+            for attr in ("actions", "rewards", "dones", "timeouts"):
+                np.testing.assert_array_equal(getattr(new, attr), getattr(old, attr))
+            with self.assertRaisesRegex(ValueError, "不需要补齐"):
+                pad_replay_buffer(old_path, root / "x.pkl", 47)
+
+    def test_resume_with_scan_warm_starts_and_keeps_old_buffer(self):
+        """走一遍真正的 `main()`：47 维续训 + `--scan` 要自动扩到 63 维。
+
+        buffer 是**补齐**不是清空（理由见 `pad_replay_buffer`：清空实测会塌），
+        所以续训之后 buffer 里应当同时有旧数据和新采的数据。
+        """
+        with TemporaryDirectory() as tmp, redirect_stdout(io.StringIO()):
+            root = Path(tmp)
+            cfg = EnvCfg(terrain="flat", max_episode_s=0.02)
+            common = ["--steps", "16", "--n-envs", "2", "--torch-threads", "1",
+                      "--seed-trot", "0", "--eval-freq", "8", "--eval-episodes", "2",
+                      "--checkpoint-freq", "8"]
+            first = root / "first"
+            with patch.object(sac_train, "RUNS_DIR", root / "runs"), \
+                    patch.object(sac_train, "EnvCfg", return_value=cfg):
+                main([*common, "--terrain", "flat", "--save-dir", str(first)])
+            self.assertEqual(checkpoint_obs_dim(first / "model"), 47)
+
+            second = root / "second"
+            with patch.object(sac_train, "RUNS_DIR", root / "runs"):
+                main([*common, "--resume", str(first / "model"), "--scan",
+                      "--save-dir", str(second)])
+
+            self.assertEqual(checkpoint_obs_dim(second / "model"), 63)
+            # 种进 best/ 的必须是**扩维后**的模型，否则评估回调加载它会维度不符
+            self.assertEqual(checkpoint_obs_dim(second / "best" / "best_model"), 63)
+            self.assertTrue((second / "warm_start" / "best_model.zip").exists())
+            self.assertTrue((second / "warm_start" / "replay_buffer_padded.pkl").exists())
+            # 旧经验必须还在。注意 `size()` 数的是**每个环境的 add 次数**（SB3 的口径），
+            # 16 步 / 2 个环境 = 8，所以"补齐"应当比"清空"多出第一轮那 8 次。
+            warmed = SAC.load(second / "model.zip", device="cpu")
+            warmed.load_replay_buffer(second / "model.pkl")
+            self.assertEqual(warmed.replay_buffer.observations.shape[-1], 63)
+            padded_size = warmed.replay_buffer.size()
+
+            # 显式 --reset-replay-buffer 仍然要能强制清空（逃生舱口）
+            third = root / "third"
+            with patch.object(sac_train, "RUNS_DIR", root / "runs"):
+                main([*common, "--resume", str(first / "model"), "--scan",
+                      "--reset-replay-buffer", "--save-dir", str(third)])
+            cleared = SAC.load(third / "model.zip", device="cpu")
+            cleared.load_replay_buffer(third / "model.pkl")
+            cleared_size = cleared.replay_buffer.size()
+            self.assertEqual(cleared_size, 8)
+            self.assertEqual(padded_size, 16)
+
+
 if __name__ == "__main__":
     torch.set_num_threads(1)
     unittest.main()
+
+
+class BestModelKeyTests(unittest.TestCase):
+    """选模判据的回归测试。实测背景：full 阶段按 eval/mean_reward 取极大值，
+    选中的是"冲 1.8 m 就地翻滚"（20/20 摔倒，+172.3），而同一批评估里真有进展的
+    那次（峰值台阶 0.15）回报只有 -29.92，永远选不上 —— 于是 best_model 忠实地
+    记录下了退化。这几条断言就是那个 bug 的护栏。
+    """
+
+    def test_success_beats_everything(self):
+        goal = 3.30
+        completer = task_key(1, 0.0, 3.30, -500.0, goal)
+        flipper = task_key(0, 5.0, 3.30, 1e6, goal)
+        self.assertGreater(completer, flipper)
+
+    def test_reward_is_only_the_last_tiebreak(self):
+        goal = 3.30
+        climber = task_key(0, 1.5, 2.4, -100.0, goal)
+        sprinter = task_key(0, 0.0, 2.4, 1e6, goal)
+        self.assertGreater(climber, sprinter)
+
+    def test_max_x_is_clamped_at_goal_x(self):
+        # 绕到 |y|≈2.2 的平地上一路向前能刷出很大的 x，但不该因此赢（§5-B5）
+        goal = 3.30
+        far = task_key(0, 0.0, 99.0, 0.0, goal)
+        at_goal = task_key(0, 0.0, goal, 0.0, goal)
+        self.assertEqual(far[2], 3.30)
+        self.assertEqual(far, at_goal)
+
+    def test_ties_do_not_overwrite(self):
+        goal = 3.30
+        a = task_key(0, 1.0, 2.0, 10.0, goal)
+        b = task_key(0, 1.0, 2.0, 10.04, goal)  # 第四项 round 到 0.1 后相同
+        self.assertEqual(a, b)  # 严格 > 比较下不会反复覆盖 best_model

@@ -21,6 +21,9 @@ from .config import (
     OBS_CMD_SCALE,
     OBS_DQ_SCALE,
     OBS_GYRO_SCALE,
+    SCAN_N,
+    SCAN_SCALE,
+    SCAN_X,
     EnvCfg,
     RewardCfg,
     obs_dim,
@@ -65,8 +68,11 @@ class Go2TerrainEnv(GymEnv):
         n = self.model.nu
         self.action_space = spaces.Box(-1.0, 1.0, (n,), np.float32)
         self.observation_space = spaces.Box(
-            -OBS_CLIP, OBS_CLIP, (obs_dim(self.cfg.privileged),), np.float32
+            -OBS_CLIP, OBS_CLIP, (obs_dim(self.cfg.privileged, self.cfg.scan),), np.float32
         )
+        # 扫描点在**机体系**里是固定的前后位置，机身系 → 世界系只差一个 yaw 旋转，
+        # 所以每步只要 cos/sin 一次就能算出 16 个世界坐标（见 _scan）。
+        self._scan_dx = np.linspace(SCAN_X[0], SCAN_X[1], SCAN_N)
 
         self.cmd_vx = self.cfg.cmd_vx[0]
         self.prev_action = np.zeros(n, dtype=np.float64)
@@ -160,7 +166,26 @@ class Go2TerrainEnv(GymEnv):
             # 只有这一维在 DDS 的 LowState 里拿不到（要用 rt/sportmodestate），默认关。
             # 基准用支撑面（四只脚下方），和奖励/终止同一套口径
             obs = np.append(obs, d.qpos[2] - self._support_height())
+        if self.cfg.scan:
+            # 顺序固定为「47 基础 + privileged 那一维 + 16 扫描」，和 config.obs_dim 一致。
+            # 扫描**必须排在最后**：暖启动是靠"新增列填 0"保持旧策略不变的（见 train.py
+            # 的 warm_start_scan），插在中间会让旧权重整体错位。
+            obs = np.concatenate([obs, self._scan(yaw)])
         return np.clip(obs, -OBS_CLIP, OBS_CLIP).astype(np.float32)
+
+    def _scan(self, yaw: float) -> np.ndarray:
+        """前方 16 点地形高度，**相对支撑面**（平地上一律 0），机体系、沿机头方向。
+
+        为什么不给绝对高度：换 `--terrain-scale` 时支撑面会整体升降，
+        绝对高度等于把"我现在站多高"混进来；策略要的是"前面比脚下高多少"。
+        为什么不给 3D 高度图：楼梯在 y 方向是均匀的，一行足够，
+        而且新增维越少，暖启动时越容易被学出来。
+        """
+        c, s = np.cos(yaw), np.sin(yaw)
+        x0, y0 = float(self.data.qpos[0]), float(self.data.qpos[1])
+        xs = x0 + c * self._scan_dx
+        ys = y0 + s * self._scan_dx
+        return (self.terrain.heights(xs, ys) - self._support_height()) * SCAN_SCALE
 
     # -------------------------------------------------------------- 接触
 
@@ -187,7 +212,13 @@ class Go2TerrainEnv(GymEnv):
         cfg = self.cfg
         rng = self.np_random
 
-        x = float(rng.uniform(*cfg.reset_x))
+        # 近台阶出生（可选）：只有 reset_frac_stair > 0 时才多抽那一个 uniform()，
+        # 所以 frac=0（默认值，也是评估环境钉死的值）时 RNG 流逐位不变，
+        # 固定种子 10000+i 的历史评估/选模 key 全部保持可比。
+        if cfg.reset_frac_stair > 0.0 and float(rng.uniform()) < cfg.reset_frac_stair:
+            x = float(rng.uniform(*cfg.reset_x_stair))
+        else:
+            x = float(rng.uniform(*cfg.reset_x))
         y = float(rng.uniform(-cfg.reset_y, cfg.reset_y))
         yaw = float(rng.uniform(-cfg.reset_yaw, cfg.reset_yaw))
         self.cmd_vx = float(rng.uniform(*cfg.cmd_vx))

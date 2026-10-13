@@ -92,6 +92,10 @@ def parse_args(argv=None):
                    help="观测里加 1 维机身离地高度（真机上没有，仅作对照）")
     p.add_argument("--reset-x", type=float, nargs=2, default=None, metavar=("LO", "HI"),
                    help="起点 x 随机范围，例如 --reset-x 1.0 2.0 直接练爬台阶")
+    p.add_argument("--reset-frac-stair", type=float, default=None, metavar="F",
+                   help="用近台阶窗口开局的回合比例，0=关闭（默认）。与 go2_sac 同义，见其 --help")
+    p.add_argument("--reset-x-stair", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                   help="近台阶出生窗口，配合 --reset-frac-stair")
     p.add_argument("--terrain-scale", type=float, default=None, metavar="S",
                    help="地形高度整体缩放（课程用）：0.3 / 0.6 / 1.0 逐级长高，1.0=原场景，0=平地。"
                         "x/y 脚印不变，只压矮高度")
@@ -146,6 +150,10 @@ def main(argv=None):
             env_cfg.privileged = bool(args.privileged)
         if args.reset_x is not None:
             env_cfg.reset_x = tuple(args.reset_x)
+        if args.reset_x_stair is not None:
+            env_cfg.reset_x_stair = tuple(args.reset_x_stair)
+        if args.reset_frac_stair is not None:
+            env_cfg.reset_frac_stair = min(max(float(args.reset_frac_stair), 0.0), 1.0)
         if args.terrain_scale is not None:
             env_cfg.terrain_scale = args.terrain_scale
         if args.action_scale is not None:
@@ -159,6 +167,10 @@ def main(argv=None):
         )
         if args.reset_x is not None:
             env_cfg.reset_x = tuple(args.reset_x)
+        if args.reset_x_stair is not None:
+            env_cfg.reset_x_stair = tuple(args.reset_x_stair)
+        if args.reset_frac_stair is not None:
+            env_cfg.reset_frac_stair = min(max(float(args.reset_frac_stair), 0.0), 1.0)
         if args.terrain_scale is not None:
             env_cfg.terrain_scale = args.terrain_scale
         if args.action_scale is not None:
@@ -242,7 +254,10 @@ def main(argv=None):
         # `self.clip_range(progress)`——setattr 成裸 float 就会在第一次更新时抛
         # TypeError: 'float' object is not callable。所以必须重新包一层。
         # learning_rate 反过来，load 回来就是裸 float，直接 setattr 即可，但 lr_schedule 要一起换。
-        if _lr_or_clip_value(model.learning_rate) != train_cfg.learning_rate:
+        # 和上面那批超参同理：**只有显式传了 --learning-rate 才覆盖**。TrainCfg 的数据类默认值
+        # 不是"用户本次指定的值"，无条件套用会把续训的 lr 静默改回默认 3e-4（SAC 那边踩过，
+        # 见 修复记录_20261012.md §2.7）。不传时保留 checkpoint 的 lr 和它的 schedule。
+        if args.learning_rate is not None and _lr_or_clip_value(model.learning_rate) != train_cfg.learning_rate:
             changed["learning_rate"] = (_lr_or_clip_value(model.learning_rate), train_cfg.learning_rate)
             model.learning_rate = train_cfg.learning_rate
             model.lr_schedule = FloatSchedule(train_cfg.learning_rate)
@@ -309,6 +324,8 @@ def main(argv=None):
         EvalMetricsCallback(
             env_cfg, reward_cfg, train_cfg.eval_freq, train_cfg.eval_episodes,
             save_dir=run_dir / "best", verbose=1,
+            reference_scales=train_cfg.eval_reference_scales,
+            reference_episodes=train_cfg.eval_reference_episodes,
         ),
     ]
 

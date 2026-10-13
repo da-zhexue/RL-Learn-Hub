@@ -380,7 +380,13 @@ def cmd_reward(argv):
     cfg.terrain, cfg.terrain_scale = terr, scale
     env = Go2TerrainEnv(cfg, RewardCfg())
     names = [n for n, _ in TERMS]
+    # **"success" 这一项在 info 里被布尔值占了**（env.py:326-329：摔倒/成功是个布尔标志，
+    # 权重那份被改名存成 "success_bonus"）。直接 `sums[n] += info[n]` 累加的是一个
+    # **成功次数**（0/1 相加），不是奖励分——2026-10-13 之前这里一直把布尔当分在印，
+    # 于是整回合的账**凭空少掉整个 success 项**（按新权重整整 300 分/次登顶）。
+    info_key = {"success": "success_bonus"}
     sums = {n: 0.0 for n in names}
+    n_success = 0
     steps = 0
     for ep in range(n_ep):
         # **不能走 run_once**：它只回传最后一步的 info，累加出来的是"每个回合的收尾那一拍"
@@ -390,16 +396,24 @@ def cmd_reward(argv):
         while True:
             obs, _, term, trunc, info = env.step(model.predict(obs, deterministic=True)[0])
             steps += 1
+            n_success += int(bool(info["success"]))
             for k in names:
-                sums[k] += float(info[k])
+                sums[k] += float(info[info_key.get(k, k)])
             if term or trunc:
                 break
     print(f"{path}  地形={terr} scale={scale}  共 {n_ep} 回合 / {steps} 步  "
-          f"(平均 {steps / n_ep:.0f} 步/回合)\n")
+          f"(平均 {steps / n_ep:.0f} 步/回合)  登顶 {n_success}/{n_ep}\n")
     for k, v in sorted(sums.items(), key=lambda kv: kv[1]):
         print(f"  {k:<16} {v:>10.1f}   ({v / steps:+.4f}/步)")
+    # 整回合的账要跟"每回合净分"一起看：单价高低本身说明不了问题，
+    # 关键是**两条路（老实爬 / 放弃）的差价**，那才是策略在优化什么。
+    total = sum(sums.values())
+    print(f"  {'-' * 44}")
+    print(f"  {'每回合净分':<16} {total / n_ep:>10.1f}   ({total / steps:+.4f}/步)")
     print("\n上表是**逐步累加**的整回合账。注意看回合有多短：如果步数远小于 1000，")
     print("说明是先摔了，各项分自然都接近 0 —— 那不是'奖励设计错了'，是还没走起来就结束了。")
+    print("判据不是某一项的高低，是**别处量到的'老实爬'和'放弃'两条路的净分差价**：")
+    print("差价塌到 ~1 倍时，梯度就不再区分这两条路，训练会倒向便宜的那条。")
     env.close()
     return 0
 

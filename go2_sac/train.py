@@ -59,9 +59,12 @@ from go2_common.terrain import TERRAINS  # noqa: E402
 from go2_common.train_utils import (  # noqa: E402
     CONFIG_NAME,
     EvalMetricsCallback,
+    checkpoint_obs_dim,
     load_resume_configs,
     make_env,
+    pad_replay_buffer,
     resolve_model_path,
+    warm_start_scan,
 )
 from go2_sac.config import TrainCfg  # noqa: E402
 
@@ -201,8 +204,21 @@ def parse_args(argv=None):
                         "超时标签已丢失的旧 buffer 必须使用此选项")
     p.add_argument("--privileged", action="store_true", default=None,
                    help="观测里加 1 维机身离地高度（真机上没有，仅作对照）")
+    p.add_argument("--scan", action="store_true", default=None,
+                   help="观测里加 16 维前方地形高度扫描（47 -> 63 维）。真机要靠深度相机+"
+                        "高程图提供，本仓库没实现，所以只用于验证'卡点是不是信息'。"
+                        "续训 47 维 checkpoint 时自动暖启动：新增列填 0，策略逐位不变，"
+                        "旧 replay buffer 因维度不符会被清空")
     p.add_argument("--reset-x", type=float, nargs=2, default=None, metavar=("LO", "HI"),
                    help="起点 x 随机范围，例如 --reset-x 1.0 2.0 直接练爬台阶")
+    p.add_argument("--reset-frac-stair", type=float, default=None, metavar="F",
+                   help="用近台阶窗口（默认 1.40~1.85）开局的回合比例，0=关闭（默认）。"
+                        "实测平地占满一回合 1000 步里的 98.5%%，接触台阶的只有 48 步；"
+                        "调大能把爬台阶的梯度从平地步态里拎出来。注意 >0 会换一条 RNG 流，"
+                        "评估环境永远钉死为 0，所以选模 key 仍然可比")
+    p.add_argument("--reset-x-stair", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                   help="近台阶出生窗口，配合 --reset-frac-stair。1.85+0.24(脚印半长)=2.09 < 2.10，"
+                        "整只狗还在第一个立面之前，不会一出生就站在台阶上")
     p.add_argument("--terrain-scale", type=float, default=None, metavar="S",
                    help="地形高度整体缩放（课程用）：0.3 / 0.6 / 1.0 逐级长高，1.0=原场景，0=平地。"
                         "x/y 脚印不变，只压矮高度")
@@ -222,6 +238,12 @@ def parse_args(argv=None):
                    help="每 N 个环境步评估一次（默认 50000）")
     p.add_argument("--eval-episodes", type=int, default=None, metavar="N",
                    help="每次评估跑几个回合。**默认 20，别往小调**（理由见 AGENT.md §5-D2）")
+    p.add_argument("--eval-ref-scales", type=float, nargs="+", default=None, metavar="S",
+                   help="每次评估额外跑的参考地形尺度（只进日志，不参与选模）。默认 (0.56, 0.70)。"
+                        "爬课程梯子时**必须按当前档位改**：和当前档相同的尺度会被自动跳过，"
+                        "若不改，升到 0.70 之后参考尺度就只剩 0.56，**没有向上看的窗口了**——"
+                        "而 R3 正是靠那个窗口（0.70 从 0/20 涨到 13/20）才确认训练真的在进步。"
+                        "建议给两个：下方一档（灾难性遗忘的哨兵）+ 上方一档（前瞻）")
     p.add_argument("--checkpoint-freq", type=int, default=None, metavar="N",
                    help="每 N 个环境步存一个 checkpoint（默认 200000）")
     p.add_argument("--torch-threads", type=int, default=TrainCfg.torch_threads)
@@ -254,8 +276,14 @@ def main(argv=None):
             env_cfg.scene = args.scene
         if args.privileged is not None:
             env_cfg.privileged = bool(args.privileged)
+        if args.scan is not None:
+            env_cfg.scan = bool(args.scan)
         if args.reset_x is not None:
             env_cfg.reset_x = tuple(args.reset_x)
+        if args.reset_x_stair is not None:
+            env_cfg.reset_x_stair = tuple(args.reset_x_stair)
+        if args.reset_frac_stair is not None:
+            env_cfg.reset_frac_stair = min(max(float(args.reset_frac_stair), 0.0), 1.0)
         if args.terrain_scale is not None:
             env_cfg.terrain_scale = args.terrain_scale
         if args.action_scale is not None:
@@ -266,9 +294,14 @@ def main(argv=None):
             scene=args.scene or DEFAULT_SCENE,
             terrain=args.terrain or "full",
             privileged=bool(args.privileged),
+            scan=bool(args.scan),
         )
         if args.reset_x is not None:
             env_cfg.reset_x = tuple(args.reset_x)
+        if args.reset_x_stair is not None:
+            env_cfg.reset_x_stair = tuple(args.reset_x_stair)
+        if args.reset_frac_stair is not None:
+            env_cfg.reset_frac_stair = min(max(float(args.reset_frac_stair), 0.0), 1.0)
         if args.terrain_scale is not None:
             env_cfg.terrain_scale = args.terrain_scale
         if args.action_scale is not None:
@@ -284,6 +317,50 @@ def main(argv=None):
     )
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    # 观测维度变了（这次新开地形扫描，47 -> 63）时，**不能**拿旧 checkpoint 直接 SAC.load：
+    # 第一层权重的形状对不上，SB3 会当场报错。先把 checkpoint 扩成新维度再续训，
+    # 新增的输入列填 0 —— 这样暖启动那一刻策略和旧模型**逐位相同**（有单测，
+    # 见 go2_common/tests/test_training_fixes.py），新维度只能靠梯度自己长进来。
+    #
+    # 必须做在下面"种 best"**之前**：种进去的要是扩维后的模型，否则评估回调加载
+    # 那个 47 维的 inherited_best 时会因为维度不符炸掉。
+    force_reset_buffer = False
+    if resume_path is not None:
+        want_dim = obs_dim(env_cfg.privileged, env_cfg.scan)
+        got_dim = checkpoint_obs_dim(resume_path)
+        if got_dim != want_dim:
+            warm_path = run_dir / "warm_start" / "best_model.zip"
+            warm_start_scan(resume_path, warm_path, want_dim)
+            print(f"  暖启动：观测 {got_dim} -> {want_dim} 维"
+                  f"（新增 {want_dim - got_dim} 维地形扫描，权重填 0，策略逐位不变）")
+            print(f"  暖启动模型：{warm_path}")
+            resume_path = warm_path
+            # 旧 buffer 存的是 got_dim 维观测，维度不符。
+            # **补齐，不要清空**：2026-10-13 实测清空两次都塌（R7、R12），
+            # R12 在 25k 步内 actor_loss 冲到 −126、成功率 8/20 → 0/20，
+            # 而同样条件不清 buffer 的 R11 完全正常。机理见 pad_replay_buffer 的注释。
+            if replay_buffer_path is not None and not args.reset_replay_buffer:
+                padded = run_dir / "warm_start" / "replay_buffer_padded.pkl"
+                pad_replay_buffer(replay_buffer_path, padded, want_dim)
+                print(f"  replay buffer 补齐到 {want_dim} 维（新增列填 0，"
+                      f"保留 {padded.stat().st_size / 1e6:.0f} MB 旧经验）：{padded}")
+                replay_buffer_path = padded
+            else:
+                replay_buffer_path = None
+                force_reset_buffer = True
+
+    # 换档续训（--save-dir 指向新目录）时，先把续训起点种进新目录的 best/。
+    # 不种的话，新目录里 `_bootstrap_best` 的两个分支都会落空（既没有 best_metric.json，
+    # 也没有 best/best_model.zip），于是**第一次评估**——它发生在 25k 步之后、权重已经被
+    # 练过一轮——会直接当上基准。万一那 25k 步把策略练差了，新档的 best_model 就会比
+    # 继承来的那个还差，而这正是 §2.1 那条 key 要防的事。种进去之后 `_bootstrap_best`
+    # 会按**当前口径**把它重新量一遍当基准（口径不同，不会误用旧 key），换档不再丢东西。
+    inherited_best = run_dir / "best" / "best_model.zip"
+    if resume_path is not None and not inherited_best.exists():
+        inherited_best.parent.mkdir(parents=True, exist_ok=True)
+        inherited_best.write_bytes(pathlib.Path(resume_path).read_bytes())
+        print(f"  已把续训起点种进 {inherited_best}（换档时用来立选模基准）")
+
     train_cfg = TrainCfg(total_steps=args.steps, n_envs=args.n_envs, seed=args.seed)
     if args.learning_rate is not None:
         train_cfg.learning_rate = args.learning_rate
@@ -295,6 +372,8 @@ def main(argv=None):
         train_cfg.eval_freq = args.eval_freq
     if args.eval_episodes is not None:
         train_cfg.eval_episodes = args.eval_episodes
+    if args.eval_ref_scales is not None:
+        train_cfg.eval_reference_scales = tuple(args.eval_ref_scales)
     if args.checkpoint_freq is not None:
         train_cfg.checkpoint_freq = args.checkpoint_freq
     if args.seed_trot is not None:
@@ -310,7 +389,8 @@ def main(argv=None):
             f, indent=2, ensure_ascii=False,
         )
     print(f"地形={env_cfg.terrain}(scale={env_cfg.terrain_scale:g})  action_scale={env_cfg.action_scale:g}  "
-          f"观测维度={obs_dim(env_cfg.privileged)}  "
+          f"观测维度={obs_dim(env_cfg.privileged, env_cfg.scan)}"
+          f"{'(含 16 维地形扫描)' if env_cfg.scan else ''}  "
           f"环境数={args.n_envs}  总步数={args.steps:,}  输出目录={run_dir}")
 
     # 每个 --save-dir 一个 tb 子目录（全写进 runs/ 会把不同 run 的曲线混成一条，见 AGENT.md §5-A5）
@@ -330,22 +410,33 @@ def main(argv=None):
         model = SAC.load(str(resume_path), env=vec_env, device="cpu", tensorboard_log=str(tb_dir))
         try:
             prepare_resume_buffer(
-                model, replay_buffer_path, args.reset_replay_buffer, train_cfg.learning_starts
+                model,
+                replay_buffer_path,
+                args.reset_replay_buffer or force_reset_buffer,
+                train_cfg.learning_starts,
             )
         except Exception:
             vec_env.close()
             raise
-        # 续训必须显式把超参再盖回去：SAC.load() 不传 kwargs，checkpoint 里存的超参
+        # 续训必须显式把超参再盖回去：SAC.load() 会还原 checkpoint 里的超参。
+        #
+        # 但**不能拿 train_cfg 直接比**：TrainCfg 的数据类默认值不是"用户本次指定的值"，
+        # 没传 CLI 开关的项会被静默改回默认值。实测踩过：续训时不写 --learning-rate，
+        # checkpoint 里的 1e-4 被无声换成默认 3e-4，两次评估内就把爬台阶的能力丢掉。
+        # 所以凡是**有 CLI 开关**的项，一律只在显式传了的时候才覆盖；没有 CLI 开关的项
+        # （batch_size/tau/gamma/train_freq）本来也只能靠改 config.py 来调，仍以 config 为准。
         changed = {}
-        for name, want in (
-            ("learning_rate", train_cfg.learning_rate),
-            ("batch_size", train_cfg.batch_size),
-            ("tau", train_cfg.tau),
-            ("gamma", train_cfg.gamma),
-            ("gradient_steps", train_cfg.gradient_steps),
-            ("target_entropy", train_cfg.target_entropy),
-            ("train_freq", train_cfg.train_freq),
+        for name, want, explicit in (
+            ("learning_rate", train_cfg.learning_rate, args.learning_rate is not None),
+            ("batch_size", train_cfg.batch_size, True),
+            ("tau", train_cfg.tau, True),
+            ("gamma", train_cfg.gamma, True),
+            ("gradient_steps", train_cfg.gradient_steps, args.gradient_steps is not None),
+            ("target_entropy", train_cfg.target_entropy, args.target_entropy is not None),
+            ("train_freq", train_cfg.train_freq, True),
         ):
+            if not explicit:
+                continue
             got = getattr(model, name, None)
             if got != want:
                 changed[name] = (got, want)
@@ -358,7 +449,11 @@ def main(argv=None):
             print("  续训覆盖超参（checkpoint 里的值 -> 本次指定的值）：")
             for k, (g, w) in changed.items():
                 print(f"    {k}: {g} -> {w}")
-            print(f"    （实际生效的 lr_schedule(1) = {model.lr_schedule(1)}）")
+        # 无论覆盖与否都打印**实际生效**的值：上面那个坑就是靠这行才发现的
+        print(f"  续训生效超参：lr={model.learning_rate:g} (lr_schedule(1)={model.lr_schedule(1):g})  "
+              f"gamma={model.gamma:g}  tau={model.tau:g}  batch={model.batch_size}  "
+              f"gradient_steps={model.gradient_steps}  target_entropy={model.target_entropy}  "
+              f"train_freq={model.train_freq.frequency}")
         # buffer_size 不覆盖：buffer 已经按旧容量分配好了，中途改会丢数据，收益也不大
         reset_num_timesteps = False
     else:
@@ -403,6 +498,8 @@ def main(argv=None):
         EvalMetricsCallback(
             env_cfg, reward_cfg, train_cfg.eval_freq, train_cfg.eval_episodes,
             save_dir=run_dir / "best", verbose=1, save_buffer=True,
+            reference_scales=train_cfg.eval_reference_scales,
+            reference_episodes=train_cfg.eval_reference_episodes,
         ),
     ]
 
