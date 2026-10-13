@@ -203,6 +203,10 @@ def parse_args(argv=None):
                    help="观测里加 1 维机身离地高度（真机上没有，仅作对照）")
     p.add_argument("--reset-x", type=float, nargs=2, default=None, metavar=("LO", "HI"),
                    help="起点 x 随机范围，例如 --reset-x 1.0 2.0 直接练爬台阶")
+    p.add_argument("--reset-frac-stair", type=float, default=None, metavar="F",
+                   help="从近台阶窗口出生的回合比例，0=关闭（默认），例如 0.5")
+    p.add_argument("--reset-x-stair", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                   help="近台阶出生 x 窗口，默认 1.40 1.85；配合 --reset-frac-stair 使用")
     p.add_argument("--terrain-scale", type=float, default=None, metavar="S",
                    help="地形高度整体缩放（课程用）：0.3 / 0.6 / 1.0 逐级长高，1.0=原场景，0=平地。"
                         "x/y 脚印不变，只压矮高度")
@@ -256,6 +260,10 @@ def main(argv=None):
             env_cfg.privileged = bool(args.privileged)
         if args.reset_x is not None:
             env_cfg.reset_x = tuple(args.reset_x)
+        if args.reset_x_stair is not None:
+            env_cfg.reset_x_stair = tuple(args.reset_x_stair)
+        if args.reset_frac_stair is not None:
+            env_cfg.reset_frac_stair = min(max(args.reset_frac_stair, 0.0), 1.0)
         if args.terrain_scale is not None:
             env_cfg.terrain_scale = args.terrain_scale
         if args.action_scale is not None:
@@ -269,6 +277,10 @@ def main(argv=None):
         )
         if args.reset_x is not None:
             env_cfg.reset_x = tuple(args.reset_x)
+        if args.reset_x_stair is not None:
+            env_cfg.reset_x_stair = tuple(args.reset_x_stair)
+        if args.reset_frac_stair is not None:
+            env_cfg.reset_frac_stair = min(max(args.reset_frac_stair, 0.0), 1.0)
         if args.terrain_scale is not None:
             env_cfg.terrain_scale = args.terrain_scale
         if args.action_scale is not None:

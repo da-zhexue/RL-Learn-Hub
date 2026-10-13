@@ -139,6 +139,8 @@ go2_ppo/*.py               同上，把算法换成 PPO
 | `--resume PATH` | 无 | 接着训，`PATH` **不带后缀**（`models/xxx/best/best_model`、`.../checkpoints/rl_50000_steps`；写了 `.zip` 也认）；会读它同目录（找不到就往上一层找）的 `config.json`，并自动加载旁边的 replay buffer（同名 `.pkl`，或 CheckpointCallback 的 `*_replay_buffer_*_steps.pkl`）。路径写错会直接报错，不会静默从头训。PPO 只能续 PPO 自己的模型 |
 | `--privileged` | 关 | 观测里加 1 维机身离地高度（真机上没有，仅作对照）：47 维 → 48 维 |
 | `--reset-x LO HI` | `-0.3 0.3` | 起点 x 的随机范围，例如 `--reset-x 1.20 2.05` 直接练爬台阶 |
+| `--reset-frac-stair F` | `0` | SAC 训练时从近台阶出生窗口抽样的回合比例；例如 `0.5` 表示一半回合从近台阶开始。评估始终关闭此项以保持评估口径 |
+| `--reset-x-stair LO HI` | `1.40 1.85` | SAC 近台阶出生的 x 范围，与 `--reset-frac-stair` 配合使用 |
 | `--terrain-scale S` | `1.0` | 地形高度整体缩放（课程用）：`1.0`=原场景、`0`=平地。x/y 脚印不变，只压矮高度 |
 | `--action-scale A` | `0.6` | 关节目标幅度 `q_target = q_default + A·a`，决定能跨多高的槛。续训要么显式给、要么确认和上次一致 |
 | `--learning-rate LR` | `3e-4` | 微调时调小（如 `1e-4`）。续训不显式给会被 checkpoint 的值静默覆盖 |

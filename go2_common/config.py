@@ -130,6 +130,9 @@ class EnvCfg:
     # --- 重置分布
     reset_x: tuple = (-0.3, 0.3)
     reset_y: float = 0.15  # y 在 ±0.15 内随机
+    # 可选地按比例从近台阶窗口出生；默认 0 保持旧分布与 RNG 消耗不变。
+    reset_x_stair: tuple = (1.40, 1.85)
+    reset_frac_stair: float = 0.0
     reset_yaw: float = 0.20  # 偏航在 ±0.20 rad 内随机
     reset_z: tuple = (0.30, 0.33)  # home 关键帧的脚底会陷进地面约 18 mm，抬高一点让它自己落稳
 

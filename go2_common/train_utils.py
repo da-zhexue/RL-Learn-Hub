@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import pathlib
-from dataclasses import fields
+from dataclasses import fields, replace
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
@@ -38,7 +38,8 @@ class EvalMetricsCallback(BaseCallback):
 
     def __init__(self, env_cfg, reward_cfg, eval_freq, n_episodes, save_dir, verbose=0, save_buffer=False):
         super().__init__(verbose)
-        self.eval_env = Go2TerrainEnv(env_cfg, reward_cfg)
+        eval_cfg = replace(env_cfg, reset_frac_stair=0.0)
+        self.eval_env = Go2TerrainEnv(eval_cfg, reward_cfg)
         self.eval_freq = eval_freq
         self.n_episodes = n_episodes
         self.save_dir = pathlib.Path(save_dir)

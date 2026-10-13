@@ -187,7 +187,10 @@ class Go2TerrainEnv(GymEnv):
         cfg = self.cfg
         rng = self.np_random
 
-        x = float(rng.uniform(*cfg.reset_x))
+        if cfg.reset_frac_stair > 0.0 and float(rng.uniform()) < cfg.reset_frac_stair:
+            x = float(rng.uniform(*cfg.reset_x_stair))
+        else:
+            x = float(rng.uniform(*cfg.reset_x))
         y = float(rng.uniform(-cfg.reset_y, cfg.reset_y))
         yaw = float(rng.uniform(-cfg.reset_yaw, cfg.reset_yaw))
         self.cmd_vx = float(rng.uniform(*cfg.cmd_vx))

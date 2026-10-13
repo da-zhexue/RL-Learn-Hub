@@ -186,6 +186,44 @@ class TimeoutTests(unittest.TestCase):
             main(["--reset-replay-buffer"])
 
 
+class StairResetTests(unittest.TestCase):
+    def test_reset_fraction_selects_stair_window(self):
+        env = Go2TerrainEnv(EnvCfg(terrain="full", reset_frac_stair=1.0))
+        try:
+            for seed in range(5):
+                env.reset(seed=seed)
+                self.assertGreaterEqual(env.data.qpos[0], 1.40)
+                self.assertLessEqual(env.data.qpos[0], 1.85)
+        finally:
+            env.close()
+
+    def test_zero_reset_fraction_keeps_original_x_draw(self):
+        cfg = EnvCfg(terrain="full", reset_x=(-0.3, 0.3), reset_frac_stair=0.0)
+        env = Go2TerrainEnv(cfg)
+        try:
+            seed = 17
+            expected_x = np.random.default_rng(seed).uniform(*cfg.reset_x)
+            env.reset(seed=seed)
+            self.assertAlmostEqual(env.data.qpos[0], expected_x)
+        finally:
+            env.close()
+
+    def test_cli_and_evaluation_reset_fraction(self):
+        args = parse_args([
+            "--reset-frac-stair", "0.5", "--reset-x-stair", "1.40", "1.85",
+        ])
+        self.assertEqual(args.reset_frac_stair, 0.5)
+        self.assertEqual(args.reset_x_stair, [1.40, 1.85])
+
+        cfg = EnvCfg(terrain="full", reset_frac_stair=0.5)
+        with TemporaryDirectory() as tmp:
+            callback = EvalMetricsCallback(cfg, RewardCfg(), 100, 1, tmp)
+            try:
+                self.assertEqual(callback.eval_env.cfg.reset_frac_stair, 0.0)
+                self.assertEqual(cfg.reset_frac_stair, 0.5)
+            finally:
+                callback.eval_env.close()
+
 class LevelBonusTests(unittest.TestCase):
     def test_descent_does_not_rearm_bonus_and_reset_does(self):
         env = Go2TerrainEnv(EnvCfg(terrain="full"), RewardCfg())
