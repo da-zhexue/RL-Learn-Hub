@@ -31,8 +31,6 @@ class RewardInput:
     base_w: np.ndarray  # 机体系角速度
     base_pos: np.ndarray  # 世界系位置 (x, y, z)
     prev_x: float  # 上一步的 x（progress 要差分）
-    # "当地地形高度"一律指**支撑面**：四只脚下方地形高度的中位数
-    # （env._support_height -> terrain.TerrainHeight.support_height），不是机身中心处的 top()。
     terrain_h: float
     prev_terrain_h: float  # 上一步的支撑面高度
     terrain_level: int  # 当前站上第几级台阶（0=还在平地/槛上）
@@ -58,83 +56,41 @@ def _potential_x(x: float, cfg: RewardCfg) -> float:
 
 
 def _progress(r: RewardInput, cfg: RewardCfg) -> float:
-    """前进奖励：x 势能的**增量**，按走廊权重加权：Δx · w(y)。
-
-    * 用势能增量而不是"每步付一次"的速度年金；
-    * 不乘 γ（这里和 _climb 都刻意不乘）；
-    * 走廊权重 w(y) 乘在**增量**上，不乘在累积势能上。
-
-    三条都是被实测逼出来的，推导见 AGENT.md §5-B1 / §5-B2 / §5-B3。
-    """
+    """前进奖励：x 势能的**增量**，按走廊权重加权：Δx · w(y)。"""
     prev = _potential_x(float(r.prev_x), cfg)
     cur = _potential_x(float(r.base_pos[0]), cfg)
     return float((cur - prev) * _corridor(float(r.base_pos[1]), cfg))
 
 
 def _track_lin_vel(r: RewardInput, cfg: RewardCfg) -> float:
-    """速度跟踪，高斯型，最优点就是指令速度。
-
-    尾部减掉 vx=0 处的取值，使得零动作原地不动精确得 0 分（理由见 AGENT.md §5-B1）。
-    """
+    """速度跟踪，高斯型，最优点就是指令速度。"""
     floor = float(np.exp(-(r.cmd_vx**2) / cfg.track_sigma))
     return float(max(0.0, np.exp(-((r.base_v[0] - r.cmd_vx) ** 2) / cfg.track_sigma) - floor))
 
 
 def _climb(r: RewardInput, cfg: RewardCfg) -> float:
-    """爬升奖励：地形势能的增量 γ·h(x') − h(x)，h 是**支撑面高度**（四只脚下方的中位数）。
-
-    用地形高度增量而不是机身高度增量——后者抬屁股/弹跳就能刷分。权重必须给足
-    （推理见 AGENT.md §5-B4）。`climb_gamma` 为 1.0，即不乘 γ（见 AGENT.md §5-B2）。
-
-    h 的定义必须是支撑面：曾经用机身中心处的 `terrain.top()`，于是**机身中心**越过台阶
-    立面就把整级台阶发完（哪怕脚还全在平地上），直接教出"伸头蹭一下台阶就倒地"的策略。
-    """
+    """爬升奖励：地形势能的增量 γ·h(x') − h(x)，h 是**支撑面高度**（四只脚下方的中位数）。"""
     return float(cfg.climb_gamma * r.terrain_h - r.prev_terrain_h)
 
 
 def _level_bonus(r: RewardInput, cfg: RewardCfg) -> float:
-    """每登上一级新台阶给一次性的分。
-
-    climb 是势能增量，只在"跨上台阶沿的那一步"出现一次，很容易被动作噪声淹没；
-    台阶数是个**离散**信号，直接告诉策略"你上了一个新高度"，比连续势能好学好认。
-    与本回合此前的最高级比较；退下来再上同一级不重复发放，掉下去由 climb 项罚。
-    """
+    """每登上一级新台阶给一次性的分。"""
     return float(max(0, r.terrain_level - r.prev_terrain_level))
 
 
 def _base_height(r: RewardInput, cfg: RewardCfg) -> float:
-    """机身离当地地形的高度**偏差**（正值，权重是负的 -> 惩罚）。平地和顶平台目标值相同。
-
-    返回**线性**偏差而不是 exp(-err²)，并且带死区 height_dead_zone——
-    两者都是为了让"站着不动"不被奖励、让跨台阶的跨坐姿势不挨罚（见 AGENT.md §5-B1 / §5-B4）。
-    """
+    """机身离当地地形的高度**偏差**（正值，权重是负的 -> 惩罚）。平地和顶平台目标值相同。"""
     err = abs(float(r.base_pos[2]) - r.terrain_h - cfg.height_target)
     return float(max(0.0, err - cfg.height_dead_zone))
 
 
 def _lateral(r: RewardInput, cfg: RewardCfg) -> float:
-    """别跑偏到地形外面去（**权重已置 0**，函数体保留，理由见下面 _lateral_vel 的注释）。
-
-    被否掉的原因：它罚的是绝对横向位置 y²，而观测里没有 y——策略看不见，学不会纠偏。
-    实测它是最大一笔支出（rl_800000 平地 6 局 −0.510/步，占每步支出的 60%）。
-    """
+    """别跑偏到地形外面去（**权重已置 0**，函数体保留，理由见下面 _lateral_vel 的注释）。"""
     return float(r.base_pos[1] ** 2)
 
 
 def _lateral_vel(r: RewardInput, cfg: RewardCfg) -> float:
-    """横向速度的平方，**世界系**（= 走廊坐标系里的 vy，正是上面 y² 的时间导数）。
-
-    为什么用世界系而不是机体系：实测手调开环小跑 10 局的方差——世界系 vy²=0.0462、
-    |vy|=0.186，机体系 vy²=0.0022，**差 21 倍**。也就是说这台狗的横漂几乎全是
-    "机头偏了、沿机身直走"造成的（yaw 一偏，−sin(yaw)·vx 就变成了世界系 vy），
-    不是真的侧滑；罚机体系等于罚了个寂寞（Isaac 的惯例是罚机体系，这里刻意不照抄）。
-
-    为什么可学：加了航向观测 (sin yaw, cos yaw) 之后，这一项的主项 −sin(yaw)·vx 是
-    策略可以自己算出来的量；改之前它和 `yaw` 一样属于"看不见但要交的税"。
-    注意它**不罚位置**：|y| 一旦偏出去，往回走同样要付 vy²，靠"回来"是赚不回来的。
-    位置性的约束仍由 progress 的走廊权重 w(y) 管（|y|≥1.25 归零，§5-B5），
-    那一条挂在"走"上，所以"站住不动攒位置"依然不是解（§5-B1）。
-    """
+    """横向速度的平方，**世界系**（= 走廊坐标系里的 vy，正是上面 y² 的时间导数）。"""
     return float(r.base_v[1] ** 2)
 
 

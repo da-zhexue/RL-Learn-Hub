@@ -1,16 +1,4 @@
-"""地形：课程变体、地形高度查询、成功/摔倒判据。
-
-地形本身**不新建 xml**，直接用 unitree_mujoco 自带的那份
-`unitree_robots/go2/scene.xml` —— 它正好就是"平地 -> 两个 0.08 m 的槛 -> 六级 0.15 m 台阶"：
-
-    x=1.2 / 1.6 : box size[2]=0.04 -> 高 0.08 m 的槛
-    x=2.3 ~ 3.4 : box size[2]=0.15 ~ 0.9，顶面 0.17 / 0.32 / 0.47 / 0.62 / 0.77 / 0.92 m
-                  再往前 x>3.66 是 0.92 m 的悬崖
-
-而且 simulate_python/config.py 加载的就是这个文件，所以训练地形 == 用户已经在跑的仿真地形。
-
-课程变体用 MuJoCo 的 MjSpec 在内存里删几何体得到，不写临时文件、不改原 xml。
-"""
+"""地形：课程变体、地形高度查询、成功/摔倒判据。"""
 
 from __future__ import annotations
 
@@ -52,13 +40,7 @@ def build_model(scene: str, terrain: str = "full", scale: float = 1.0) -> mujoco
 
 
 class TerrainHeight:
-    """地形高度查询表。
-
-    构造时把 worldbody 里的方块缓存成 [x_lo, x_hi, y_lo, y_hi, top]，
-    `top(x, y)` 返回该点最高的一块（没有方块盖住就是地面 z=0）。
-    奖励和终止判据都从这里取"当地地形高度"，绝不硬编码方块坐标
-    —— 这样课程变体（删掉方块）自动生效。
-    """
+    """地形高度查询表。"""
 
     def __init__(self, model: mujoco.MjModel):
         self.boxes: list[tuple[float, float, float, float, float]] = []
@@ -76,9 +58,6 @@ class TerrainHeight:
             self.boxes.append(
                 (float(cx - sx), float(cx + sx), float(cy - sy), float(cy + sy), top)
             )
-            # 台阶和槛靠"底面在不在水平地面"区分：槛坐在地面上（pos_z == size_z），
-            # 台阶是埋进地里的（pos_z=0.02 < size_z）。这个判据对 terrain_scale 缩放免疫，
-            # 而按顶面高度筛（旧的 size[2] > 0.1 写法）在课程压矮后会把台阶全漏掉。
             if cz - sz < -1e-6:
                 stair_tops.add(round(top, 4))
         self.boxes.sort(key=lambda b: b[0])
@@ -96,11 +75,7 @@ class TerrainHeight:
 
     def top_footprint(self, x: float, y: float = 0.0,
                       half_x: float = 0.24, half_y: float = 0.12) -> float:
-        """身体脚印范围内的**最大**地形高度。出生点必须用这个，不能用中心点的高度。
-
-        狗身长约 0.4 m，横跨高度不连续处（槛的棱、台阶的立面）时中心还在平地、
-        前脚已探到台阶上方。默认半长宽按偏航 ±0.20 rad 时的投影取的。
-        """
+        """身体脚印范围内的**最大**地形高度。出生点必须用这个，不能用中心点的高度。"""
         ys = (y - half_y, y, y + half_y)
         return max(
             self.top(float(xi), float(yi))
@@ -109,26 +84,7 @@ class TerrainHeight:
         )
 
     def support_height(self, foot_xy) -> float:
-        """狗**实际站立的地面**高度：四只脚下方地形高度的中位数。
-
-        **绝不能用机身中心 (x, y) 处的 `top()` 代替。** 地形在台阶立面处是不连续的，
-        机身中心一旦越过立面，取到的就是"狗还没站上去的那一级"——实测（s0.86 模型）：
-        机身中心越过 x=2.1、四只脚里只有一只搭在台阶上时，`climb` 就把整级台阶
-        （0.1462 m × 100 = +14.6）连 `level_bonus +5` 一起发完了，而狗还在平地上、
-        roll 已经 -0.66 在侧翻。这个"白拿"直接教出了"伸头蹭一下台阶就倒地"的策略，
-        是"六段课程、205 万步、最远 x 一直卡在 2.1"的头号原因（见 AGENT.md §5-C6）。
-
-        中位数（而不是 min/max）：台阶的踏面深度（0.19~0.28 m）比狗的脚印（0.4 m）短，
-        狗站在楼梯上永远是两条腿在一级、两条腿在相邻一级，中位数正好落在**它踩着的那一级**上：
-        平地 = 0，两前腿上一级 = 半级，前后跨两级 = 较低那级，登上顶平台 = 顶面高度。
-        取 min 会要求四条腿全部上去（踏面根本放不下），信号太稀疏；
-        取 max 则一只脚悬在台阶上方就能拿满分，和现在一样能刷。
-
-        入参 foot_xy 是四只脚的 (x, y)，顺序无所谓。
-
-        torch 那边（`core.CourseTerrain.support_height`）必须逐位复现这里的中位数语义：
-        偶数个样本取中间两个的**平均**，所以那边不能用 `torch.median`（它取中间偏下那个）。
-        """
+        """狗**实际站立的地面**高度：四只脚下方地形高度的中位数。"""
         return float(np.median([self.top(float(x), float(y)) for x, y in foot_xy]))
 
     def level_at_height(self, h: float) -> int:
@@ -151,15 +107,7 @@ def is_success(cfg, base_pos) -> bool:
 
 
 def is_fallen(cfg, support_h: float, base_pos) -> bool:
-    """机身贴着**脚下的地面**了（摔倒）。
-
-    用"相对当地地形"而不是绝对高度：在顶平台上 base 有 1.19 m，在平地上只有 0.27 m，
-    绝对阈值在台阶上永远触发不了。
-
-    support_h 必须传 `TerrainHeight.support_height` 的结果（四只脚下方的中位数），
-    不是机身中心处的 `top()`：机身中心一越过台阶立面，站立余量就被凭空扣掉整级台阶
-    （s1.0 时正好扣光 0.17 m，fall_clearance 是 0.10，本来站得好好的狗会被判"贴地"）。
-    """
+    """机身贴着**脚下的地面**了（摔倒）。"""
     z = float(base_pos[2])
     return (z - support_h) < cfg.fall_clearance
 

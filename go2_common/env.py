@@ -117,22 +117,12 @@ class Go2TerrainEnv(GymEnv):
         self.foot_geom_ids = np.array(sorted(foot_ids), dtype=int)
 
     def _support_height(self) -> float:
-        """狗实际站立的地面高度（四只脚下方的中位数），见 `terrain.support_height`。
-
-        这是 `step()` 里唯一的"当地地形高度"来源：`climb` / `level_bonus` /
-        `base_height` / `is_fallen` 全都吃它。换成机身中心处的 `terrain.top()`
-        会让狗在没爬上去的时候就领到整级台阶的分（实测证据见 terrain.py 的注释）。
-        """
+        """狗实际站立的地面高度（四只脚下方的中位数），见 `terrain.support_height`。"""
         xy = self.data.geom_xpos[self.foot_geom_ids][:, :2]
         return self.terrain.support_height(xy)
 
     def support_level(self) -> int:
-        """当前站上第几级——按**支撑面**算，和 `step()` 里发 `level_bonus` 的那个数同源。
-
-        诊断/回放看"最高台阶"要用这个，别用 `terrain.level(x, y)`：后者是**机身中心**
-        的口径，机身探到台阶上方时它就已经算上去了，会比狗真正站上的级数高一级
-        （这正是旧版奖励虚高的那件事，见 `terrain.support_height`）。
-        """
+        """当前站上第几级——按**支撑面**算，和 `step()` 里发 `level_bonus` 的那个数同源。"""
         return self.terrain.level_at_height(self._support_height())
 
     # -------------------------------------------------------------- 观测
