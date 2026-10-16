@@ -25,6 +25,7 @@ from .config import (
     RewardCfg,
     obs_dim,
     projected_gravity,
+    quat_rotate,
     quat_to_rpy,
 )
 from .reward import RewardInput, compute_reward
@@ -71,10 +72,19 @@ class Go2TerrainEnv(GymEnv):
         self._build_index_maps()
         self._build_contact_masks()
 
+        # 地形高度扫描的采样点（机体系，z=0 平面上的偏移）。关掉时是 None，
+        # _obs() 完全不碰它，行为和老版本逐位一致。
+        self.scan_offsets = (
+            np.array([(dx, dy, 0.0) for dx in self.cfg.scan_x for dy in self.cfg.scan_y],
+                     dtype=np.float64)
+            if self.cfg.height_scan else None
+        )
+        self.n_scan = 0 if self.scan_offsets is None else len(self.scan_offsets)
+
         n = self.model.nu
         self.action_space = spaces.Box(-1.0, 1.0, (n,), np.float32)
         self.observation_space = spaces.Box(
-            -OBS_CLIP, OBS_CLIP, (obs_dim(self.cfg.privileged),), np.float32
+            -OBS_CLIP, OBS_CLIP, (obs_dim(self.cfg.privileged, self.n_scan),), np.float32
         )
 
         self.cmd_vx = self.cfg.cmd_vx[0]
@@ -162,6 +172,24 @@ class Go2TerrainEnv(GymEnv):
             vx = (pos[:, 0] - self.prev_foot_x) / self.dt
         return clearance, vx, air, pos[:, 0].copy()
 
+    def _height_scan(self) -> np.ndarray:
+        """机体系采样点下方的地形高度 − 机身高度，clip ±1（身高扫描 / height scan）。
+
+        1) 用**完整姿态**把采样点旋到世界系：狗在台阶上抬头时扫描要跟着机身转，
+           否则"前方 0.8 m"会指到斜上方去。
+        2) 值 = terrain.top(采样点) − base_z（legged_gym / IsaacLab 的约定）：
+           平地约等于 −0.28（= 站立高度取负），台阶顶面比脚下高多少就是多少。
+           真机上可由 rt/utlidar 的高度图 + 机身高度估计算出来，**不需要 LowState 以外的特权**。
+        """
+        quat = self.data.qpos[3:7]
+        base = self.data.qpos[:3]
+        offsets = quat_rotate(quat, self.scan_offsets)
+        heights = np.array([
+            self.terrain.top(float(base[0] + ox), float(base[1] + oy))
+            for ox, oy, _ in offsets
+        ])
+        return np.clip(heights - base[2], -1.0, 1.0)
+
     def _climb_height(self, median_h: float) -> float:
         """climb 项的势能：由 cfg.climb_stat 决定用四只脚下地形高度的哪个统计量。
 
@@ -212,6 +240,9 @@ class Go2TerrainEnv(GymEnv):
             # 只有这一维在 DDS 的 LowState 里拿不到（要用 rt/sportmodestate），默认关。
             # 基准用支撑面（四只脚下方），和奖励/终止同一套口径
             obs = np.append(obs, d.qpos[2] - self._support_height())
+        if self.cfg.height_scan:
+            # 地形高度扫描追加在最后：47 本体 + 特权(可选) + n_scan。见 _height_scan()。
+            obs = np.append(obs, self._height_scan())
         return np.clip(obs, -OBS_CLIP, OBS_CLIP).astype(np.float32)
 
     # -------------------------------------------------------------- 接触

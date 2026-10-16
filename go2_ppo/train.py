@@ -90,6 +90,13 @@ def parse_args(argv=None):
                         "所以 checkpoints/rl_xxx 这种路径直接给就行）。**只能续 PPO 自己的模型**")
     p.add_argument("--privileged", action="store_true", default=None,
                    help="观测里加 1 维机身离地高度（真机上没有，仅作对照）")
+    p.add_argument("--height-scan", action="store_true", default=None,
+                   help="观测里追加地形高度扫描（机体系 5×3=15 维，见 EnvCfg.height_scan）。"
+                        "**会改变观测维度：打开后不能续训 47 维的老模型**（SB3 会在 load 时报错）")
+    p.add_argument("--scan-x", type=float, nargs="+", default=None, metavar="X",
+                   help="扫描点在机体系的前方偏移 (m)，默认 0.0 0.2 0.4 0.6 0.8")
+    p.add_argument("--scan-y", type=float, nargs="+", default=None, metavar="Y",
+                   help="扫描点在机体系的横向偏移 (m)，默认 -0.2 0.0 0.2")
     p.add_argument("--reset-x", type=float, nargs=2, default=None, metavar=("LO", "HI"),
                    help="起点 x 随机范围，例如 --reset-x 1.0 2.0 直接练爬台阶")
     p.add_argument("--terrain-scale", type=float, default=None, metavar="S",
@@ -144,6 +151,12 @@ def main(argv=None):
             env_cfg.scene = args.scene
         if args.privileged is not None:
             env_cfg.privileged = bool(args.privileged)
+        if args.height_scan is not None:
+            env_cfg.height_scan = bool(args.height_scan)
+        if args.scan_x is not None:
+            env_cfg.scan_x = tuple(args.scan_x)
+        if args.scan_y is not None:
+            env_cfg.scan_y = tuple(args.scan_y)
         if args.reset_x is not None:
             env_cfg.reset_x = tuple(args.reset_x)
         if args.terrain_scale is not None:
@@ -157,6 +170,12 @@ def main(argv=None):
             terrain=args.terrain or "full",
             privileged=bool(args.privileged),
         )
+        if args.height_scan is not None:
+            env_cfg.height_scan = bool(args.height_scan)
+        if args.scan_x is not None:
+            env_cfg.scan_x = tuple(args.scan_x)
+        if args.scan_y is not None:
+            env_cfg.scan_y = tuple(args.scan_y)
         if args.reset_x is not None:
             env_cfg.reset_x = tuple(args.reset_x)
         if args.terrain_scale is not None:
@@ -202,8 +221,12 @@ def main(argv=None):
         )
     rollout_batch = train_cfg.n_steps * args.n_envs
     print(f"地形={env_cfg.terrain}(scale={env_cfg.terrain_scale:g})  action_scale={env_cfg.action_scale:g}  "
-          f"观测维度={obs_dim(env_cfg.privileged)}  "
+          f"观测维度={obs_dim(env_cfg.privileged, env_cfg.n_scan)}  "
           f"环境数={args.n_envs}  总步数={args.steps:,}  输出目录={run_dir}")
+    if env_cfg.height_scan:
+        print(f"  地形高度扫描：{len(env_cfg.scan_x)}×{len(env_cfg.scan_y)}={env_cfg.n_scan} 维  "
+              f"x={list(env_cfg.scan_x)}  y={list(env_cfg.scan_y)}  "
+              f"（机体系，值 = 采样点下方地形高度 − 机身高度）")
     print(f"每轮 rollout：{train_cfg.n_steps} 步 × {args.n_envs} 环境 = {rollout_batch:,} 条样本，"
           f"{train_cfg.n_epochs} 个 epoch × {rollout_batch // train_cfg.batch_size} 个 minibatch")
 

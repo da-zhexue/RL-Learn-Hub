@@ -38,10 +38,24 @@ OBS_DQ_SCALE = 0.05
 OBS_CLIP = 10.0
 OBS_DIM = 47
 
+# 地形高度扫描的默认采样网格（机体系，单位 m）。见 EnvCfg.height_scan。
+# 只覆盖身体正前方 0~0.8 m：爬台阶要的是"我前面那级台阶有多高"，不是周围一圈。
+SCAN_X = (0.0, 0.2, 0.4, 0.6, 0.8)
+SCAN_Y = (-0.2, 0.0, 0.2)
 
-def obs_dim(privileged: bool = False) -> int:
-    """观测维度。privileged=True 时多 1 维"机身高出当地地形的高度"。"""
-    return OBS_DIM + (1 if privileged else 0)
+
+def scan_dim(height_scan: bool, scan_x, scan_y) -> int:
+    """高度扫描的维数；height_scan=False 时是 0。"""
+    return len(scan_x) * len(scan_y) if height_scan else 0
+
+
+def obs_dim(privileged: bool = False, n_scan: int = 0) -> int:
+    """观测维度 = 47 本体感觉 + 1 特权(可选) + 高度扫描(可选)。
+
+    n_scan 默认 0：go2_issac/core.py 和旧 config.json 都按 47/48 走。
+    加扫描是**新增维度**，旧模型不能续训（SB3 会在 load 时报形状不匹配，不会静默）。
+    """
+    return OBS_DIM + (1 if privileged else 0) + int(n_scan)
 
 
 # ------------------------------------------------------------------ 姿态小工具
@@ -54,6 +68,23 @@ def quat_to_rpy(quat) -> np.ndarray:
     pitch = np.arcsin(np.clip(2.0 * (w * y - z * x), -1.0, 1.0))
     yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
     return np.array([roll, pitch, yaw], dtype=np.float64)
+
+
+def quat_rotate(quat, vec) -> np.ndarray:
+    """用四元数 (w,x,y,z) 旋转向量 vec（可以是 (3,) 或 (N,3)）。
+
+    高度扫描用它把"机体系前方 0.8 m"旋成世界系偏移：狗在台阶上抬头时，
+    不旋转的话采样点会指到斜上方去。
+    """
+    w, x, y, z = (float(v) for v in quat)
+    q = np.array([x, y, z], dtype=np.float64)
+    arr = np.asarray(vec, dtype=np.float64)
+    single = arr.ndim == 1
+    u = np.atleast_2d(arr)
+    qb = np.broadcast_to(q, u.shape)
+    t = 2.0 * np.cross(qb, u)
+    out = u + w * t + np.cross(qb, t)
+    return out[0] if single else out
 
 
 def projected_gravity(quat) -> np.ndarray:
@@ -100,6 +131,15 @@ class EnvCfg:
     # --- 观测
     privileged: bool = False
 
+    # --- 地形感知（height scan）
+    # 47 维本体观测里没有任何地形信息：实测盲策略在 0.10~0.11 m 台阶就到顶，
+    # 而"前面那级台阶有多高"对策略完全未知。打开后追加
+    # len(scan_x)×len(scan_y) 维 = 机体系采样点下方的地形高度 − 机身高度（clip ±1）。
+    # **开关改变观测维度，旧模型不能续训**；真机上要订阅 rt/utlidar 的高度图。
+    height_scan: bool = False
+    scan_x: tuple = SCAN_X
+    scan_y: tuple = SCAN_Y
+
     # --- 终止 / 成功判据
     fall_clearance: float = 0.10  # 机身低于当地地形这么多就判摔倒（阈值依据见 AGENT.md §5-C3）
     flip_rad: float = 1.0  # |roll| 或 |pitch| 超过它判翻转（阈值依据见 AGENT.md §5-C3）
@@ -109,6 +149,11 @@ class EnvCfg:
     goal_z: float = 1.05
     goal_clearance: float = 0.15  # 站上顶面时 base 约比顶面高 0.27，留 0.15 表示确实站在高处
     goal_y: float = 1.0
+
+    @property
+    def n_scan(self) -> int:
+        """高度扫描的维数（height_scan=False 时为 0）。asdict() 不会带上它。"""
+        return scan_dim(self.height_scan, self.scan_x, self.scan_y)
 
 
 @dataclass

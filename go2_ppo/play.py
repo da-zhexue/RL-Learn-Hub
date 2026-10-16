@@ -145,6 +145,13 @@ def play_dds(model, env_cfg, args):
 
     姿态一律从四元数自己算，不读 rpy / base 高度 / foot_force（见 AGENT.md §4.4）。
     """
+    if getattr(env_cfg, "height_scan", False):
+        raise SystemExit(
+            "这个模型的观测带地形高度扫描（height_scan=True），47 维那套 DDS LowState 组不出来。\n"
+            "真机上要先订阅 rt/utlidar/height_map（unitree_go/HeightMap_）拿高度图，再按机体系\n"
+            "采样点算出 scan（值 = 地形高度 − 机身高度，clip ±1）拼在观测最后。\n"
+            "在那之前只能用 --mode viewer 回放。"
+        )
     sys.path.insert(0, str(CTRL_DIR))
     from go2_ctrl import Q_MAX, Q_MIN, Go2Ctrl
 
