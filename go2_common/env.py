@@ -58,6 +58,15 @@ class Go2TerrainEnv(GymEnv):
             else np.inf
         )
         self.max_steps = int(round(self.cfg.max_episode_s / (self.cfg.sim_dt * self.cfg.decimation)))
+        # 抬脚奖励的目标高度：默认按地形最高一级台阶自动算（课程缩放时自动跟着变），
+        # 地形没有台阶（flat/steps）时 = 0，等于关闭这一项（见 reward._feet_clearance）。
+        _tops = self.terrain.stair_tops
+        _rise = max((b - a for a, b in zip(_tops, _tops[1:])), default=0.0)
+        self.clearance_target = float(
+            self.reward_cfg.clearance_target if self.reward_cfg.clearance_target > 0.0
+            else (_rise + self.reward_cfg.clearance_margin if _tops else 0.0)
+        )
+        self.dt = self.cfg.sim_dt * self.cfg.decimation
 
         self._build_index_maps()
         self._build_contact_masks()
@@ -74,6 +83,8 @@ class Go2TerrainEnv(GymEnv):
         # 少了它 progress 项在第一次 step 就 AttributeError。
         self.prev_x = 0.0
         self.prev_terrain_h = 0.0
+        self.prev_climb_h = 0.0
+        self.prev_foot_x = None  # 上一拍四只脚的世界系 x，用来算脚的前向速度
         self.prev_terrain_level = 0  # Highest level reached before the current step.
         self.step_count = 0
 
@@ -115,6 +126,57 @@ class Go2TerrainEnv(GymEnv):
         )
         # 顺序无所谓（support_height 取中位数），但固定下来便于调试
         self.foot_geom_ids = np.array(sorted(foot_ids), dtype=int)
+        # 脚底球半径：算脚底离地高度要用，直接从模型读，不抄常量
+        self.foot_radius = self.model.geom_size[self.foot_geom_ids, 0].copy()
+
+    def foot_clearance(self) -> np.ndarray:
+        """每只脚脚底离**它正下方**地形的高度（可能为负 = 脚陷在方块里）。
+
+        顺序同 `foot_geom_ids`。diag / 奖励 / 诊断都用这一个口径：
+        用机身下方的地形（老 diag 的做法）在台阶前会把两只脚的高度算错一整级。
+        """
+        pos = self.data.geom_xpos[self.foot_geom_ids]
+        ground = np.array([self.terrain.top(float(x), float(y)) for x, y in pos[:, :2]])
+        return pos[:, 2] - self.foot_radius - ground
+
+    def _foot_state(self):
+        """逐脚的量：脚底离正下方地形的高度、脚是否离地、脚的世界系前向速度。
+
+        foot_clearance 用的是脚**正下方**的地形高度，不是机身下方的：狗站在台阶前时
+        机身 x 已经越过台阶前沿（terrain.top 会返回台阶顶面），脚还在平地上。
+        用机身高度会把两者混起来，量到的抬脚高度是假的（diag.py 的老口径就有这个问题）。
+        """
+        pos = self.data.geom_xpos[self.foot_geom_ids]
+        clearance = self.foot_clearance()
+        air = np.ones(len(pos), dtype=bool)
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            for j, gid in enumerate(self.foot_geom_ids):
+                if c.geom1 == gid or c.geom2 == gid:
+                    other = c.geom2 if c.geom1 == gid else c.geom1
+                    if self.model.geom_bodyid[other] == 0:  # 碰到地形 = 落地
+                        air[j] = False
+        if self.prev_foot_x is None:
+            vx = np.zeros(len(pos))
+        else:
+            vx = (pos[:, 0] - self.prev_foot_x) / self.dt
+        return clearance, vx, air, pos[:, 0].copy()
+
+    def _climb_height(self, median_h: float) -> float:
+        """climb 项的势能：由 cfg.climb_stat 决定用四只脚下地形高度的哪个统计量。
+
+        median（默认）会漏掉「两只前脚已经踩上台阶」这一段；mean 把这段补上。
+        """
+        stat = getattr(self.reward_cfg, 'climb_stat', 'median')
+        if stat == 'median':
+            return median_h  # 同一套口径，直接用算好的中位数
+        xy = self.data.geom_xpos[self.foot_geom_ids][:, :2]
+        hs = [self.terrain.top(float(x), float(y)) for x, y in xy]
+        if stat == 'mean':
+            return float(np.mean(hs))
+        if stat == 'max':
+            return float(np.max(hs))
+        raise ValueError(f'climb_stat 只能是 median/mean/max，收到 {stat!r}')
 
     def _support_height(self) -> float:
         """狗实际站立的地面高度（四只脚下方的中位数），见 `terrain.support_height`。"""
@@ -203,6 +265,8 @@ class Go2TerrainEnv(GymEnv):
         # 支撑面必须在 mj_forward **之后**取：在那之前 geom_xpos 还停在上一回合的位置，
         # 四只脚读到的是上一次落点（出生点离台阶近时差一整级台阶）。
         self.prev_terrain_h = self._support_height()
+        self.prev_climb_h = self._climb_height(self.prev_terrain_h)
+        self.prev_foot_x = self.data.geom_xpos[self.foot_geom_ids][:, 0].copy()
         self.prev_terrain_level = self.terrain.level_at_height(self.prev_terrain_h)
 
         info = {
@@ -235,7 +299,9 @@ class Go2TerrainEnv(GymEnv):
         rpy = quat_to_rpy(d.qpos[3:7])
         # 支撑面高度 = 四只脚下方的中位数，**不是**机身中心处的 top()（见 _support_height）
         terrain_h = self._support_height()
+        climb_h = self._climb_height(terrain_h)
         terrain_level = self.terrain.level_at_height(terrain_h)
+        foot_clearance, foot_vx, foot_air, foot_x = self._foot_state()
 
         success = terrain.is_success(cfg, base_pos)
         terminated = bool(
@@ -260,18 +326,26 @@ class Go2TerrainEnv(GymEnv):
             prev_x=self.prev_x,
             terrain_h=terrain_h,
             prev_terrain_h=self.prev_terrain_h,
+            climb_h=climb_h,
+            prev_climb_h=self.prev_climb_h,
             terrain_level=terrain_level,
             prev_terrain_level=self.prev_terrain_level,
             cmd_vx=self.cmd_vx,
             contact_force=self._contact_force(),
             terminated=terminated,
             success=success,
+            foot_clearance=foot_clearance,
+            foot_vx=foot_vx,
+            foot_air=foot_air,
+            clearance_target=self.clearance_target,
         )
         reward, parts = compute_reward(r, self.reward_cfg)
 
         self.prev_action = action
         self.prev_x = float(base_pos[0])
         self.prev_terrain_h = terrain_h
+        self.prev_climb_h = climb_h
+        self.prev_foot_x = foot_x
         # Retain the episode maximum: descending must not rearm a level bonus.
         self.prev_terrain_level = max(self.prev_terrain_level, terrain_level)
 

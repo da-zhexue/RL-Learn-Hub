@@ -328,13 +328,37 @@ def term_track_lin_vel(st: State, cfg: RewardCfg) -> torch.Tensor:
 
 
 def term_climb(st: State, cfg: RewardCfg) -> torch.Tensor:
-    """爬升奖励：地形势能增量。用地形高度而不是机身高度（抬屁股就能刷后者）。"""
+    """爬升奖励：地形势能增量。用地形高度而不是机身高度（抬屁股就能刷后者）。
+
+    cfg.climb_stat 在 Isaac 侧只实现了 median（= st.terrain_h）。改成 mean/max 会
+    静默地用中位数算出一个不一样的奖励，所以这里显式报错，逼着先移植。
+    """
+    if getattr(cfg, "climb_stat", "median") != "median":
+        raise NotImplementedError(
+            f"Isaac 侧还没有 climb_stat={cfg.climb_stat!r}：需要在 State 里补 mean/max"
+        )
     return cfg.climb_gamma * st.terrain_h - st.prev_terrain_h
 
 
 def term_level_bonus(st: State, cfg: RewardCfg) -> torch.Tensor:
     """每登上一级新台阶的一次性奖励。只涨不跌（掉下来由 climb 罚）。"""
     return torch.clamp(st.terrain_level - st.prev_terrain_level, min=0).to(F64)
+
+
+def term_feet_clearance(st: State, cfg: RewardCfg) -> torch.Tensor:
+    """抬脚塑形（对应 MuJoCo 的 reward._feet_clearance）。
+
+    **Isaac 侧尚未移植**：State 里还没有逐脚的地形高度 / 前向速度 / 离地标志，
+    所以这里只有在权重为 0 时返回全 0；一旦把权重打开就显式报错，
+    而不是静默地少算一项奖励（静默失败是这个仓库最贵的一类问题，见 AGENT.md §5-A）。
+    """
+    if float(getattr(cfg, "feet_clearance", 0.0)) != 0.0:
+        raise NotImplementedError(
+            "Isaac 侧还没有 feet_clearance：需要在 State/advance 里补 "
+
+            "foot_clearance / foot_vx / foot_air（对照 go2_common/reward.py 的同名项）"
+        )
+    return torch.zeros(st.base_pos.shape[0], dtype=F64, device=st.base_pos.device)
 
 
 def term_base_height(st: State, cfg: RewardCfg) -> torch.Tensor:
@@ -400,6 +424,7 @@ TERMS = (
     ("track_lin_vel", term_track_lin_vel),
     ("climb", term_climb),
     ("level_bonus", term_level_bonus),
+    ("feet_clearance", term_feet_clearance),
     ("base_height", term_base_height),
     ("lateral", term_lateral),
     ("lateral_vel", term_lateral_vel),

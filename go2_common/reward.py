@@ -33,12 +33,19 @@ class RewardInput:
     prev_x: float  # 上一步的 x（progress 要差分）
     terrain_h: float
     prev_terrain_h: float  # 上一步的支撑面高度
+    climb_h: float  # climb 项用的势能（按 cfg.climb_stat 选的统计量）
+    prev_climb_h: float
     terrain_level: int  # 当前站上第几级台阶（0=还在平地/槛上）
     prev_terrain_level: int  # 本步之前本回合到过的最高级（包含出生级数）
     cmd_vx: float  # 本回合的前进速度指令
     contact_force: float  # 非脚部件与地形的接触法向力之和
     terminated: bool  # 本步是否因为摔倒/成功而终止
     success: bool  # 本步是否到达终点
+    # 逐脚的量（顺序与 env.foot_geom_ids 一致，4 只脚）
+    foot_clearance: np.ndarray  # 脚底离**它正下方**地形的高度，可能为负（脚陷在方块里）
+    foot_vx: np.ndarray  # 脚的世界系前向速度，用来判断"在迈步"而不是站着抬脚
+    foot_air: np.ndarray  # 脚是否离地（不接触地形）
+    clearance_target: float  # 本回合的目标离地间隙（由地形高度算出）
 
 
 # ------------------------------------------------------------------ 前进 / 高度
@@ -69,13 +76,31 @@ def _track_lin_vel(r: RewardInput, cfg: RewardCfg) -> float:
 
 
 def _climb(r: RewardInput, cfg: RewardCfg) -> float:
-    """爬升奖励：地形势能的增量 γ·h(x') − h(x)，h 是**支撑面高度**（四只脚下方的中位数）。"""
-    return float(cfg.climb_gamma * r.terrain_h - r.prev_terrain_h)
+    """爬升奖励：地形势能的增量 γ·h(x') − h(x)。
+
+    h 是四只脚下方地形高度的统计量（cfg.climb_stat，默认中位数）。
+    用中位数时，"两只前脚搭上台阶"这一段完全没有梯度 —— 这正是 0.15 m 台阶爬不上去的
+    一个直接原因（见 RewardCfg.climb_stat）。
+    """
+    return float(cfg.climb_gamma * r.climb_h - r.prev_climb_h)
 
 
 def _level_bonus(r: RewardInput, cfg: RewardCfg) -> float:
     """每登上一级新台阶给一次性的分。"""
     return float(max(0, r.terrain_level - r.prev_terrain_level))
+
+
+def _feet_clearance(r: RewardInput, cfg: RewardCfg) -> float:
+    """**摆动腿**抬到目标间隙之前给正奖励，用来学会"把脚抬过更高的台阶"。
+
+    只有"离地 + 正在往前迈"的脚才算：站着原地抬脚不给分（否则可以刷分）。
+    目标高度由 env 按地形算（= 台阶高度 + 余量），所以它随课程自动缩放。
+    """
+    if r.clearance_target <= 0.0:
+        return 0.0
+    gate = np.asarray(r.foot_air, dtype=bool) & (np.asarray(r.foot_vx) > cfg.clearance_vx)
+    lift = np.minimum(np.maximum(np.asarray(r.foot_clearance), 0.0), r.clearance_target)
+    return float(np.sum(np.where(gate, lift, 0.0)))
 
 
 def _base_height(r: RewardInput, cfg: RewardCfg) -> float:
@@ -154,6 +179,7 @@ TERMS = (
     ("track_lin_vel", _track_lin_vel),
     ("climb", _climb),
     ("level_bonus", _level_bonus),
+    ("feet_clearance", _feet_clearance),
     ("base_height", _base_height),
     ("lateral", _lateral),
     ("lateral_vel", _lateral_vel),

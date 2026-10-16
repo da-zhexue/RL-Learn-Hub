@@ -235,7 +235,8 @@ class LevelBonusTests(unittest.TestCase):
             with patch.object(env, "_support_height", side_effect=heights), \
                     patch("go2_common.env.mujoco.mj_step"):
                 infos = [env.step(np.zeros(12))[-1] for _ in heights]
-            self.assertEqual([i["level_bonus"] for i in infos], [5, 5, 0, 0, 5])
+            w = RewardCfg().level_bonus
+            self.assertEqual([i["level_bonus"] for i in infos], [w, w, 0, 0, w])
             self.assertEqual([i["level"] for i in infos], [1, 2, 1, 2, 3])
             self.assertEqual([i["max_level"] for i in infos], [1, 2, 2, 2, 3])
             self.assertEqual(env.prev_terrain_level, 3)
@@ -245,7 +246,7 @@ class LevelBonusTests(unittest.TestCase):
             env.data.qpos[2] = 1.2
             with patch.object(env, "_support_height", return_value=tops[0]), \
                     patch("go2_common.env.mujoco.mj_step"):
-                self.assertEqual(env.step(np.zeros(12))[-1]["level_bonus"], 5)
+                self.assertEqual(env.step(np.zeros(12))[-1]["level_bonus"], RewardCfg().level_bonus)
         finally:
             env.close()
 

@@ -53,6 +53,11 @@ def foot_ids(env):
     return {n: mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, n) for n in FOOT_GEOM_NAMES}
 
 
+def _order_of(env, ids):
+    """把 foot_geom_ids 的顺序映射回 FOOT_GEOM_NAMES 的名字顺序。"""
+    return [int(np.where(env.foot_geom_ids == ids[n])[0][0]) for n in FOOT_GEOM_NAMES]
+
+
 def run_once(env, act, seed=0):
     """跑一个回合，返回 (最远x, 最高台阶, 步数, info)。"""
     st = {"x": -9.0, "lv": 0}
@@ -313,15 +318,17 @@ def cmd_policy(argv):
     ids, tr = foot_ids(env), {n: [] for n in FOOT_GEOM_NAMES}
     for ep in range(3):
         def on_step(e):
-            g = e.terrain.top(float(e.data.qpos[0]), float(e.data.qpos[1]))
-            for n, i in ids.items():
-                tr[n].append(float(e.data.geom_xpos[i][2]) - g)
+            # 用**逐脚**正下方的地形：机身 x 在台阶上方时 terrain.top(机身) 已经是台阶顶，
+            # 拿它当基准会把还在平地上的脚算高一整级（老口径的 bug）。
+            for n, i in zip(FOOT_GEOM_NAMES, _order_of(e, ids)):
+                tr[n].append(float(e.foot_clearance()[i]))
         run_episode(env, policy_act(model), seed=300 + ep, on_step=on_step)
     print(f"{path}  地形={terrain} scale={scale}\n")
     for n, v in tr.items():
         v = np.array(v)
         print(f"  {n}: 最高 {v.max():.3f}  中位 {np.median(v):.3f}  "
-              f"贴地(<0.03)时间占比 {(v < 0.03).mean() * 100:5.1f}%")
+              f"贴地(<0.03)时间占比 {(v < 0.03).mean() * 100:5.1f}%  "
+              f"达到目标 {env.clearance_target:.3f} 的占比 {(v >= env.clearance_target).mean() * 100:5.1f}%")
     print("\n跨 8 cm 的槛要抬到 0.102 m。后腿抬不起来 = 前腿上了槛、后腿跟不上，卡成跨坐姿势。")
     env.close()
     return 0

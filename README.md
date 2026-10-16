@@ -6,11 +6,12 @@
 主要目标为多种强化学习运控算法实践与Issac Sim的使用。
 | 目标 | 完成 |
 | --- | --- |
+| 传统控制狗走路 |  |
 | SAC训狗上台阶 | ✅ |
 | Issac Sim中PPO训狗 |  |
+| mjlab中PPO训狗 |  |
 | Model Base的强化学习算法训狗 |  |
 | WBC传统控制人形机器人跑步 |  |
-| SAC人形机器人跑步 |  |
 | PPO人形机器人跑步 |  |
 
 ## 本地环境
@@ -184,56 +185,11 @@ go2_ppo/*.py               同上，把算法换成 PPO
 ```
 bash sac_train.sh
 ```
-或者等价为
-```
-python3 -m go2_sac.train --terrain flat --action-scale 0.6 \
-    --steps 200_000 --checkpoint-freq 50_000     # 先学会在平地小跑
-```
-然后跑地形课程（从上面那个平地模型出发，逐级放开地形）：
-```
-python3 -m go2_sac.train --terrain steps --terrain-scale 0.70 --action-scale 0.6 \
-    --learning-rate 2e-4 --fresh-reward --steps 250_000 \
-    --save-dir models/go2_sac_steps_s0.70 --resume models/go2_sac_flat_xx/...
-python3 -m go2_sac.train --terrain steps --terrain-scale 0.86 --action-scale 0.6 \
-    --learning-rate 2e-4 --fresh-reward --reset-x -0.3 0.95 --steps 250_000 \
-    --save-dir models/go2_sac_steps_s0.86 --resume models/go2_sac_steps_s0.70/model
-python3 -m go2_sac.train --terrain steps --terrain-scale 1.00 --action-scale 0.6 \
-    --learning-rate 2e-4 --fresh-reward --reset-x -0.3 0.95 --steps 250_000 \
-    --save-dir models/go2_sac_steps_s1.00 --resume models/go2_sac_steps_s0.86/model
-```
-
-```
-python3 -m go2_sac.train --terrain full --terrain-scale 0.56 --action-scale 0.7 \
-    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 200_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s0.56 --resume models/go2_sac_steps_s1.00/model  # 首级 0.095 m
-python3 -m go2_sac.train --terrain full --terrain-scale 0.62 --action-scale 0.7 \
-    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 250_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s0.62 --resume models/go2_sac_full_s0.56/model   # 0.105 m
-python3 -m go2_sac.train --terrain full --terrain-scale 0.70 --action-scale 0.7 \
-    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 250_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s0.70 --resume models/go2_sac_full_s0.62/model   # 0.119 m
-python3 -m go2_sac.train --terrain full --terrain-scale 0.78 --action-scale 0.7 \
-    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 250_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s0.78 --resume models/go2_sac_full_s0.70/model   # 0.133 m
-python3 -m go2_sac.train --terrain full --terrain-scale 0.86 --action-scale 0.7 \
-    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 250_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s0.86 --resume models/go2_sac_full_s0.78/model   # 0.146 m
-python3 -m go2_sac.train --terrain full --terrain-scale 0.93 --action-scale 0.7 \
-    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 300_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s0.93 --resume models/go2_sac_full_s0.86/model   # 0.158 m
-python3 -m go2_sac.train --terrain full --terrain-scale 1.00 --action-scale 0.7 \
-    --learning-rate 1e-4 --fresh-reward --reset-x 1.20 2.05 --steps 350_000 --checkpoint-freq 50_000 \
-    --save-dir models/go2_sac_full_s1.00 --resume models/go2_sac_full_s0.93/model   # 原尺寸 0.170 m
-```
 
 #### 训练过程查看
 ```
 tensorboard --logdir /path/to/unitree/runs
 ```
-
-`eval/mean_level` / `eval/max_level` 从 2026-10-12 起统计回合轨迹最高级（包括出生级数），
-结束时的级数另记在 `eval/mean_final_level` / `eval/max_final_level`。旧日志不会自动修正。
-成功仍按原到顶判据判断；`best_model` 仍按平均回报选择，本次未更改选模标准。
 
 ### 回放
 ```
@@ -249,10 +205,10 @@ python3 -m go2_sac.play --mode viewer --model models/go2_sac_full_xxx/model.zip
 | 项 | 形式 | 权重 | 说明 |
 | --- | --- | --- | --- |
 | progress | `Δx · w(y)`，走廊内的 x 势能增量 | +100 /米 | 主收入，走完全程约 +190 |
-| climb | `Δ地形高度`（不是 Δ机身高度） | +100 /米 | 爬高，爬完六级 +57 |
-| level_bonus | 超过本回合此前最高级的新增级数 | +5 | 出生级数不发奖，退下来再上同一级不重复发放 |
+| climb | `Δ地形高度`（不是 Δ机身高度） | +340 /米 | 爬高，爬完六级 +57 |
+| level_bonus | 超过本回合此前最高级的新增级数 | +20 | 出生级数不发奖，退下来再上同一级不重复发放 |
 | track_lin_vel | `max(0, e^{-(vx-cmd)²/σ²} − e^{-cmd²/σ²})` | +1.0 | 步态质量（金额很小） |
-| success | 站上顶平台 = 1（终止） | +20 | |
+| success | 站上顶平台 = 1（终止） | +450 | |
 
 **惩罚项（姿态 / 平滑 / 能耗）**
 
@@ -287,6 +243,9 @@ python3 -m go2_sac.play --mode viewer --model models/go2_sac_full_xxx/model.zip
 
 1、提高目标直接相关奖励占比，如：将出生点放在楼梯前，去掉了过前面槛、走一段路的奖励，走楼梯的reward占总reward的占比高。
 2、跳出局部最优解，如：在楼梯训练阶段，直接上最高的楼梯会发现reward提高但模型在上台阶方面退化，实际上是模型拿不到奖励，在往降低惩罚的方向发展，最终训出了保守策略，倾向于在楼梯前卡着不动。设置楼梯高度梯度训练，最低的高度模型有概率上去，发现这个解更优，就能走出那个保守的局部最优解。
+
+### 结论
+2026年10月16日结束SAC训练，不加入高层的地形观测量最终大概会卡在full0.6到full0.8的高度，且SAC受是否有地形观测的影响更大，之后准备转入PPO并加上地形观测，分别在mujoco+gym、mjlab、issaclab三种环境上进行训练，同时学习传统控制方法。
 
 ## GO2强化学习过地形（PPO）
 和上面那节的**唯一区别是算法**：环境、地形、奖励、观测、课程分级、命令行参数、`config.json`

@@ -130,6 +130,12 @@ class RewardCfg:
     yaw: float = -1.0  # 地形关于 y 对称、外面是无限平地，不压住航向就会横着漂
     yaw_rate: float = -0.25
 
+    # --- 迈步（**密集塑形，用来爬上更高的台阶**）
+    # 摆动腿抬到 clearance_target 之前的正奖励。没有这一项时，"抬多高"这件事
+    # 完全没有梯度：狗在 0.06~0.09 m 的台阶上用小碎步就够了，而 0.15 m 需要
+    # 完全不同的步态（前脚要抬到 0.17 才落得上顶面），稀疏的 climb/success
+    # 信号在"抬不够高"时给不出任何方向。权重不宜大：抬脚本身不是任务。
+    feet_clearance: float = 0.0
     # --- 平滑 / 能耗
     action_rate: float = -0.05
     torques: float = -1e-4
@@ -147,6 +153,14 @@ class RewardCfg:
     climb_gamma: float = 1.0  # climb 项的折扣，**必须为 1.0**（推导见 AGENT.md §5-B2）
     progress_y_gate: float = 1.25  # 前进奖励的走廊宽度闸门（防刷分，见 AGENT.md §5-B5）
     progress_x_cap: float = 3.5  # 过了这里不再给前进奖励
+    # climb 项用四只脚下方地形高度的哪个统计量当势能：
+    #   "median" = 老口径（四只脚的中位数）。踩上去两只脚时中位数还在地面 -> 台阶白爬，
+    #              要三只脚上去才给分。对 0.15 m 这种高台阶，这一段就是"没有梯度"。
+    #   "mean"   = 四只脚的平均。两只前脚搭上台阶就给一半的分，credit 分配平滑得多。
+    climb_stat: str = "median"
+    clearance_target: float = 0.0  # 目标离地间隙 (m)；0 = 按地形最高一级台阶自动算
+    clearance_margin: float = 0.02  # 自动目标 = 台阶高度 + 它
+    clearance_vx: float = 0.02  # 脚的前向速度超过它才算"在迈步"，站着抬脚不给分
 
 
 def to_jsonable(obj) -> dict:

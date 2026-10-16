@@ -14,7 +14,7 @@ import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 
-from go2_common.config import EnvCfg, RewardCfg
+from go2_common.config import DEFAULT_SCENE, EnvCfg, RewardCfg
 from go2_common.env import Go2TerrainEnv, run_episode
 
 CONFIG_NAME = "config.json"
@@ -169,6 +169,14 @@ def load_resume_configs(model_path: pathlib.Path):
     with open(cfg_path, encoding="utf-8") as f:
         saved = json.load(f)
     env_cfg = EnvCfg(**{k: v for k, v in saved["env"].items() if k in {f.name for f in fields(EnvCfg)}})
+    # 续训配置可能是在另一台机器/系统上生成的，绝对路径（例如 Ubuntu 的 /home/...）在 Windows 上无效。
+    # 文件缺失时按当前仓库的默认场景修正，避免跨平台迁移后必须手动改 config.json。
+    if not pathlib.Path(env_cfg.scene).exists():
+        fallback_scene = pathlib.Path(DEFAULT_SCENE)
+        if fallback_scene.exists():
+            print(f"  ! 场景文件不存在：{env_cfg.scene}，改用当前仓库场景：{fallback_scene}")
+            env_cfg.scene = str(fallback_scene)
+
     reward_cfg = RewardCfg(
         **{k: v for k, v in saved["reward"].items() if k in {f.name for f in fields(RewardCfg)}}
     )

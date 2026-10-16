@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 
 # 必须在 import torch 之前设置：每个子进程只跑物理，给它 1 个线程就够，
 # 否则 N 个环境进程各开一堆 OMP 线程，互相抢核反而更慢。
@@ -65,6 +66,118 @@ from go2_common.train_utils import (  # noqa: E402
 )
 from go2_sac.config import TrainCfg  # noqa: E402
 
+
+# --------------------------------------------------------------- 课程切换时的安全续训
+
+
+@contextmanager
+def _requires_grad(module, value: bool):
+    """临时把整个模块的 requires_grad 改掉，退出时原样还原。"""
+    saved = [(prm, prm.requires_grad) for prm in module.parameters()]
+    for prm, _ in saved:
+        prm.requires_grad_(value)
+    try:
+        yield
+    finally:
+        for prm, old in saved:
+            prm.requires_grad_(old)
+
+
+class CurriculumSAC(SAC):
+    """支持"课程切换后先只训 critic"的 SAC。
+
+    换阶段（地形更高 / 奖励改了）时，critic 的价值估计还是旧任务的，而 actor 每步都
+    沿着这个错的 Q 走：实测 Q 均值 +306 -> -139、成功率 1.00 -> 0.05，50k 步就把一个
+    100% 的模型毁掉（AGENT.md §7 里那条一直没解释的退化）。
+    先冻结 actor，让 critic 在**新地形**采到的数据上把价值追上来，再放开 actor。
+    """
+
+    def __init__(self, *args, actor_freeze_steps: int = 0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.actor_freeze_steps = int(actor_freeze_steps)
+        self.actor_lr_factor = 1.0  # 微调时可以让 actor 比 critic 学得慢（见 _update_learning_rate）
+        self._freeze_until = None
+
+    def set_anchor(self, fraction: float) -> None:
+        """把 actor 参数锚在**加载时的那一份**上：每次 train() 之后做一次
+        p <- (1-k)·p + k·p_ref。
+
+        为什么需要它：实测把一个 0.5 地形上 100% 的策略换到 0.7 地形续训，
+        不管 keep buffer / 清空 buffer / 重置 critic / 冻 actor 先训 critic，
+        只要 actor 一开始更新，**1 万步内均值动作就被推烂**（x 从 2.6 掉到 0.7，
+        连平地都走不动）。原因是 Q ≈ +300、|dQ/da| ≈ 5，Adam 每步动 lr，
+        1e4 步就能把 1/√256≈0.06 量级的 mu 权重改掉一个数量级。
+        锚定给参数漂移一个上界：稳态漂移 ≈ (每步更新量)/k。
+        """
+        import copy
+        self.anchor_fraction = float(fraction)
+        self._anchor_params = [p.detach().clone() for p in self.actor.parameters()]
+        print(f"  actor 锚定：每次更新后向参考策略拉回 {self.anchor_fraction:g}")
+
+    def _pull_to_anchor(self) -> None:
+        if getattr(self, "anchor_fraction", 0.0) <= 0.0:
+            return
+        k = self.anchor_fraction
+        with torch.no_grad():
+            for prm, ref in zip(self.actor.parameters(), self._anchor_params):
+                prm.mul_(1.0 - k).add_(ref, alpha=k)
+
+    def _update_learning_rate(self, optimizers):
+        """SB3 每次 train() 都会调它。这里把 actor 的学习率再乘一个系数：
+
+        微调一个已经能跑的策略时，critic 需要跟着新任务快速更新，actor 却只能小步走，
+        否则 1e-4 × Q 梯度（|dQ/da|≈5）在 1e4 步里就能把均值动作推走 1 rad（实测 1e-4 下
+        放开 actor 一万步内成功率 0.55 -> 0.05）。
+        """
+        super()._update_learning_rate(optimizers)
+        factor = float(getattr(self, "actor_lr_factor", 1.0))
+        if factor != 1.0:
+            for group in self.actor.optimizer.param_groups:
+                group["lr"] *= factor
+
+    def actor_is_frozen(self) -> bool:
+        if self.actor_freeze_steps <= 0:
+            return False
+        if self._freeze_until is None:
+            self._freeze_until = int(self.num_timesteps) + self.actor_freeze_steps
+            print(f'  critic-only 预热：前 {self.actor_freeze_steps:,} 步只更新 critic 和 alpha，'
+                  f'到 {self._freeze_until:,} 步放开 actor')
+        return int(self.num_timesteps) < self._freeze_until
+
+    def train(self, gradient_steps, batch_size=64):
+        if not self.actor_is_frozen():
+            result = super().train(gradient_steps, batch_size)
+            self._pull_to_anchor()
+            return result
+        # 冻结期间**连 alpha 一起冻**：actor 不动时 log_prob 是常数，SB3 的 alpha 损失
+        # 没有负反馈可用，alpha 会一路跑飞（实测 0.27 -> 0.53/0.66）。等 actor 放开时
+        # 熵项已经大了一倍，一步就把策略推走 —— 这正是第一版冻结没挡住退化的原因。
+        keep = None if self.log_ent_coef is None else self.log_ent_coef.detach().clone()
+        with _requires_grad(self.actor, False):
+            result = super().train(gradient_steps, batch_size)
+        if keep is not None:
+            with torch.no_grad():
+                self.log_ent_coef.copy_(keep)
+            if self.ent_coef_optimizer is not None:
+                self.ent_coef_optimizer.state.clear()  # 别留下跑飞的 Adam 动量
+        self._pull_to_anchor()
+        return result
+
+
+def reset_critic(model) -> None:
+    """重新初始化 critic / target critic / 它们的优化器；actor 不动。
+
+    地形或奖励变了以后旧 Q 就是错的（AGENT.md §7 的结论：这种时候必须重置 critic）。
+    """
+    for module in (model.critic, model.critic_target):
+        for m in module.modules():
+            if hasattr(m, 'reset_parameters'):
+                m.reset_parameters()
+    model.critic_target.load_state_dict(model.critic.state_dict())
+    model.critic.optimizer = type(model.critic.optimizer)(
+        model.critic.parameters(), lr=model.lr_schedule(1)
+    )
+    print('  critic 已重置（critic / target critic / 它的优化器），actor 保留')
 
 # --------------------------------------------------------------- 演示数据预热
 #
@@ -201,6 +314,9 @@ def parse_args(argv=None):
                         "超时标签已丢失的旧 buffer 必须使用此选项")
     p.add_argument("--privileged", action="store_true", default=None,
                    help="观测里加 1 维机身离地高度（真机上没有，仅作对照）")
+    p.add_argument("--cmd-vx", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                   help="每回合随机的前进速度指令范围 (m/s)。爬高台阶早期建议 0.2 0.4：命令 0.8 会让狗"
+                        "撞着立面冲，碰撞/yaw 罚分叠满")
     p.add_argument("--reset-x", type=float, nargs=2, default=None, metavar=("LO", "HI"),
                    help="起点 x 随机范围，例如 --reset-x 1.0 2.0 直接练爬台阶")
     p.add_argument("--reset-frac-stair", type=float, default=None, metavar="F",
@@ -212,6 +328,10 @@ def parse_args(argv=None):
                         "x/y 脚印不变，只压矮高度")
     p.add_argument("--action-scale", type=float, default=None, metavar="A",
                    help="关节目标幅度，决定能跨多高的槛。续训时必须显式给，否则沿用 checkpoint 的值（见 AGENT.md §5-A2）")
+    p.add_argument("--anchor-fraction", type=float, default=0.0, metavar="K",
+                   help="每次更新后把 actor 参数向加载时的参考策略拉回 K（0=关闭）。微调脆策略时用 0.02~0.1")
+    p.add_argument("--actor-lr-factor", type=float, default=1.0, metavar="F",
+                   help="actor 学习率 = learning_rate × F（critic 不变）。微调已经会走的策略时用 0.1~0.3")
     p.add_argument("--learning-rate", type=float, default=None, metavar="LR",
                    help="微调时调小（如 1e-4）。续训时不显式给会被 checkpoint 的值静默覆盖（见 AGENT.md §5-A1）")
     p.add_argument("--target-entropy", type=float, default=None, metavar="H",
@@ -233,6 +353,18 @@ def parse_args(argv=None):
                    help="用 N 条开环小跑轨迹预热 replay buffer（原理见 AGENT.md §6.4）；0 = 关闭。"
                         "不写时：从头训练默认开，**续训默认关**——预热喂的手调小跑比已经会走路的"
                         "策略差得多，拿它当先验等于把好策略往回拽")
+    p.add_argument("--freeze-actor-steps", type=int, default=0, metavar="N",
+                   help="课程切换后续训时，前 N 个环境步只更新 critic（actor 冻结），"
+                        "等 critic 追上新任务再放开。0=关闭（见 CurriculumSAC）")
+    p.add_argument("--reset-critic", action="store_true",
+                   help="续训时重新初始化 critic（actor 保留）。地形/奖励变了、旧 Q 已经错了的时候用")
+    p.add_argument("--feet-clearance", type=float, default=None, metavar="W",
+                   help="抬脚塑形奖励权重（reward.feet_clearance，正值）；0=关闭。默认不覆盖 checkpoint")
+    p.add_argument("--climb-stat", choices=["median", "mean", "max"], default=None,
+                   help="climb 项用四只脚下地形高度的哪个统计量当势能。median=老口径（两只前脚搭上"
+                        "台阶这一段没有梯度）；mean=平均，credit 分配更平滑。换它必须配 --fresh-reward")
+    p.add_argument("--clearance-target", type=float, default=None, metavar="H",
+                   help="抬脚的目标离地间隙 (m)；不给时按地形台阶高度自动算")
     return p.parse_args(argv)
 
 
@@ -264,6 +396,8 @@ def main(argv=None):
             env_cfg.reset_x_stair = tuple(args.reset_x_stair)
         if args.reset_frac_stair is not None:
             env_cfg.reset_frac_stair = min(max(args.reset_frac_stair, 0.0), 1.0)
+        if args.cmd_vx is not None:
+            env_cfg.cmd_vx = tuple(args.cmd_vx)
         if args.terrain_scale is not None:
             env_cfg.terrain_scale = args.terrain_scale
         if args.action_scale is not None:
@@ -281,11 +415,24 @@ def main(argv=None):
             env_cfg.reset_x_stair = tuple(args.reset_x_stair)
         if args.reset_frac_stair is not None:
             env_cfg.reset_frac_stair = min(max(args.reset_frac_stair, 0.0), 1.0)
+        if args.cmd_vx is not None:
+            env_cfg.cmd_vx = tuple(args.cmd_vx)
         if args.terrain_scale is not None:
             env_cfg.terrain_scale = args.terrain_scale
         if args.action_scale is not None:
             env_cfg.action_scale = args.action_scale
         reward_cfg = RewardCfg()
+
+    # 地形/奖励本身也是超参：命令行显式给了就覆盖 checkpoint 里那一套
+    if args.feet_clearance is not None:
+        reward_cfg.feet_clearance = float(args.feet_clearance)
+    if args.clearance_target is not None:
+        reward_cfg.clearance_target = float(args.clearance_target)
+    if args.climb_stat is not None:
+        reward_cfg.climb_stat = args.climb_stat
+    if reward_cfg.feet_clearance:
+        _tgt = "自动(按台阶高度)" if reward_cfg.clearance_target <= 0 else f"{reward_cfg.clearance_target:g} m"
+        print(f"  抬脚塑形：权重 {reward_cfg.feet_clearance:g}  目标间隙 {_tgt}")
 
     # 课程缩放的档位写进目录名，免得同一个地形下 s0.6 和 s1 的模型混在一起分不清
     scale_tag = "" if env_cfg.terrain_scale == 1.0 else f"_s{env_cfg.terrain_scale:g}"
@@ -339,7 +486,8 @@ def main(argv=None):
     learning_starts = 0 if train_cfg.seed_trot_episodes > 0 else train_cfg.learning_starts
 
     if resume_path is not None:
-        model = SAC.load(str(resume_path), env=vec_env, device="cpu", tensorboard_log=str(tb_dir))
+        model = CurriculumSAC.load(str(resume_path), env=vec_env, device="cpu",
+                                  tensorboard_log=str(tb_dir))
         try:
             prepare_resume_buffer(
                 model, replay_buffer_path, args.reset_replay_buffer, train_cfg.learning_starts
@@ -373,8 +521,17 @@ def main(argv=None):
             print(f"    （实际生效的 lr_schedule(1) = {model.lr_schedule(1)}）")
         # buffer_size 不覆盖：buffer 已经按旧容量分配好了，中途改会丢数据，收益也不大
         reset_num_timesteps = False
+        if args.reset_critic:
+            reset_critic(model)
+        model.actor_freeze_steps = max(0, int(args.freeze_actor_steps))
+        model.actor_lr_factor = float(args.actor_lr_factor)
+        if args.anchor_fraction > 0.0:
+            model.set_anchor(args.anchor_fraction)
+        if args.actor_lr_factor != 1.0:
+            print(f'  actor 学习率 = {model.lr_schedule(1) * args.actor_lr_factor:g} '
+                  f'(critic {model.lr_schedule(1):g})')
     else:
-        model = SAC(
+        model = CurriculumSAC(
             "MlpPolicy",
             vec_env,
             device="cpu",
@@ -394,6 +551,7 @@ def main(argv=None):
             verbose=0,
         )
         reset_num_timesteps = True
+        model.actor_lr_factor = float(args.actor_lr_factor)
 
     if train_cfg.seed_trot_episodes > 0:
         t_seed = time.perf_counter()

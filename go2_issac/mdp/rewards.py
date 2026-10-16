@@ -84,6 +84,13 @@ def reward_level_bonus(env):
 
 
 @_per_step
+def reward_feet_clearance(env):
+    """抬脚塑形（摆动腿抬到目标间隙）。Isaac 侧尚未移植，权重为 0 时才是 0。"""
+    cfg, st = _r(env)
+    return core.term_feet_clearance(st, cfg)
+
+
+@_per_step
 def reward_base_height(env):
     """离当地地形的高度偏差（惩罚项，带死区）。"""
     cfg, st = _r(env)
@@ -183,6 +190,7 @@ TERMS: dict[str, object] = {
     "track_lin_vel": reward_track_lin_vel,
     "climb": reward_climb,
     "level_bonus": reward_level_bonus,
+    "feet_clearance": reward_feet_clearance,
     "base_height": reward_base_height,
     "lateral": reward_lateral,
     "lateral_vel": reward_lateral_vel,
