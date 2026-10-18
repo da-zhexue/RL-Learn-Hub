@@ -258,28 +258,14 @@ python3 -m go2_sac.play --mode viewer --model models/go2_sac_full_xxx/model.zip
 #### 下载、测试
 克隆仓库并下载依赖、运行测试（先下载uv，mjlab基本都用uv运行）
 ```bash
+cd mjlab_ws
 git clone https://github.com/mujocolab/mjlab.git
 cd mjlab
 uv run demo
 ```
 查看器Viser可以直接端口转发出来，在VsCode的**端口**可以直接看到。  
 #### 目录结构
-**模型**
-```
-src/mjlab/asset_zoo/robots/cartpole/
-├── __init__.py              # 空文件，标记为 Python 包
-├── cartpole_constants.py    # 机器人配置与 get_cartpole_robot_cfg()
-└── xmls/
-    └── cartpole.xml         # MuJoCo 模型（小车 + 摆杆 + 速度执行器）
-```
-**任务**
-```
-src/mjlab/tasks/cartpole/
-├── __init__.py    # 注册任务 Mjlab-Cartpole
-├── env_cfg.py     # 环境与 MDP 配置
-└── rl_cfg.py      # PPO 配置
-```
-把本目录下的mjlab_cartpole的文件放到对应目录下。
+见[mjlab_ws的readme](./mjlab_ws/README.md)
 
 #### 训练、测试
 在创建完模型和任务后可运行该条查看是否创建成功
