@@ -288,7 +288,7 @@ uv run list-envs
 ```
 **train**
 ```
-uv run python -m mjlab.scripts.train Mjlab-Cartpole --agent.max-iterations 5000
+uv run python -m mjlab.scripts.train Mjlab-Cartpole --agent.max-iterations 5000 --log-root <save-path>
 ```
 **play**
 ```
