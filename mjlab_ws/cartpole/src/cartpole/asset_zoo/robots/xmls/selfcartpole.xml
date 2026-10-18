@@ -1,0 +1,47 @@
+<mujoco model="selfcartpole">
+  <!--
+    说明：
+    - angle="degree"：XML 里关节 range 等角度单位用“度”
+    - coordinate="local"：坐标系使用 local（关节轴等在局部坐标里定义）
+    - inertiafromgeom="true"：没有显式 inertial 时，MuJoCo 会根据 geom 计算惯性
+      因此：如果你新增“仅用于显示”的 geom，一定要 density="0"，否则会改变动力学！
+  -->
+  <compiler angle="degree" coordinate="local" inertiafromgeom="true"/>
+  <worldbody>
+    <!--
+      地面不在 XML 里建 plane：
+      - CartPole 场景的地面由 SceneCfg 里的 TerrainEntityCfg(terrain_type="plane") 统一提供
+      - 这样可以避免 “XML 一个 plane + terrain 再加一个 plane” 导致出现双层地面
+    -->
+    <body name="cart" pos="0 0 0.1">
+      <!--
+        小车（cart）：
+        - 下方第 1 个 box：仅用于渲染/ghost（contype=0, conaffinity=0 不参与碰撞；density=0 不参与质量/惯性）
+        - 下方第 2 个 box：真实动力学 geom（mass=1.0），用于碰撞与惯性计算
+      -->
+      <geom type="box" size="0.2 0.1 0.1" rgba="0.2 0.2 0.8 1" density="0" contype="0" conaffinity="0"/>
+      <geom type="box" size="0.2 0.1 0.1" rgba="0.2 0.2 0.8 1" mass="1.0"/>
+      <!-- slide：小车沿 x 轴移动，范围 [-2, 2] -->
+      <joint name="slide" type="slide" axis="1 0 0" limited="true" range="-2 2"/>
+      <body name="pole" pos="0 0 0.1">
+        <!--
+          摆杆（pole）：
+          - 第 1 个 capsule：仅用于渲染/ghost（不参与碰撞与惯性）
+          - 第 2 个 capsule：真实动力学 geom（mass=2.0）
+          - hinge：绕 y 轴转动，范围 [-90°, 90°]
+        -->
+        <geom type="capsule" size="0.05 0.5" fromto="0 0 0 0 0 1" rgba="0.8 0.2 0.2 1" density="0" contype="0" conaffinity="0"/>
+        <geom type="capsule" size="0.05 0.5" fromto="0 0 0 0 0 1" rgba="0.8 0.2 0.2 1" mass="2.0"/>
+        <joint name="hinge" type="hinge" axis="0 1 0" range="-90 90"/>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <!--
+      速度执行器：对 slide 关节做速度控制
+      - ctrlrange：控制输入范围（这里是目标速度范围）
+      - kv：速度伺服增益（越大越“硬”）
+    -->
+    <velocity name="slide_velocity" joint="slide" ctrlrange="-20 20" kv="20"/>
+  </actuator>
+</mujoco>

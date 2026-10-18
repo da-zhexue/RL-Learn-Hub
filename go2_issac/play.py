@@ -88,6 +88,18 @@ def _env_cfg_from_run(run_dir: pathlib.Path):
 def main(argv=None) -> int:
     args = parse_args(argv)
 
+    # Isaac Sim 6.1 warns that geometry streaming together with Fabric transform
+    # reads can leave dynamic articulation visuals one or more frames behind
+    # PhysX.  That appears as a robot floating or jumping in the viewport.
+    # Keep the explicit user setting if supplied; otherwise disable streaming for
+    # the Kit viewport.  This affects rendering only, not physics or training.
+    kit_args = getattr(args, "kit_args", "") or ""
+    if "geometryStreaming/enabled" not in kit_args:
+        kit_args = f"{kit_args} --/rtx/hydra/geometryStreaming/enabled=false".strip()
+    if "readTransformsFromFabricInRenderDelegate" not in kit_args:
+        kit_args = f"{kit_args} --/rtx/hydra/readTransformsFromFabricInRenderDelegate=false".strip()
+    args.kit_args = kit_args
+
     from isaaclab.app import AppLauncher
     app_launcher = AppLauncher(args)
     simulation_app = app_launcher.app

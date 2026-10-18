@@ -159,20 +159,32 @@ python3 go2_issac/smoke.py --all --num-envs 4               # 其余五节
 ## 4. 训练
 
 ```bash
-# 1) 平地跑稳
-python3 go2_issac/train.py --terrain flat  --steps 200_000 --num-envs 512 --visualizer none
+# 1) 平地跑稳：Isaac/PPO 没有 MuJoCo/SAC 那种 trot_action 预热，先给足 PPO 更新量。
+python3 go2_issac/train.py --terrain flat --steps 2_000_000 --num-envs 512 --visualizer none
 
-# 2) 过两个 0.08 m 的槛
-python3 go2_issac/train.py --terrain steps --steps 100_000 --num-envs 512 --visualizer none
+# 2) 过两个 0.08 m 的槛：从平地 checkpoint 续训。
+python3 go2_issac/train.py --terrain steps --steps 2_000_000 --num-envs 512 \
+    --resume models/go2_issac_flat_<时间戳> --visualizer none
 
-# 3) 爬六级台阶
-python3 go2_issac/train.py --terrain full  --steps 150_000 --num-envs 2048 --visualizer none
+# 3) 爬六级台阶：从 steps checkpoint 续训。
+python3 go2_issac/train.py --terrain full --steps 3_000_000 --num-envs 512 \
+    --resume models/go2_issac_steps_<时间戳> --visualizer none
 ```
 
 （Isaac Lab 3.0 起没有 `--headless` 了：无头 = `--visualizer none`，不带这个参数会去开窗口。）
 
 课程顺序和 MuJoCo 侧完全一样，先易后难。`--steps` 是**总转移数**（各环境求和），
 和 `go2_ppo` 同口径。
+
+**Isaac 侧当前没有预热。** `go2_issac/train.py` 直接创建 `OnPolicyRunner` 并调用 PPO；
+没有 `trot_action`、示范轨迹或 replay buffer。PPO 的 actor 初始动作标准差是 1.0，
+随机策略通常会先摔倒，平地上只走 0.3~0.5 m 并不代表已经收敛。
+
+一次 PPO 更新收集 `num_envs × 256` 条转移。因此 `--steps 200_000 --num-envs 16`
+只有约 **49 次更新**；`--steps 200_000 --num-envs 512` 只有约 **2 次更新**，都不足以判断
+策略是否学会走路。先在 `flat` 上跑至少 2M 条总转移，再用 checkpoint 续训下一阶段。
+训练中的 `eval/*` 仍是随机策略的在线统计，不是独立确定性评估；最终请用 `play.py` 回放。
+
 
 输出 `models/go2_issac_<地形>[_s<缩放>]_<时间戳>/`：
 `config.json`（环境 + 奖励 + 超参）、`model_<迭代数>.pt`、TensorBoard 事件。

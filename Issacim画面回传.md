@@ -29,6 +29,10 @@ VirtualGL 的 EGL 后端已能访问 GPU，无需启动额外的 Xorg，也无�
 ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
     -L 15901:127.0.0.1:5901 -p 20465 u2024210044@10.160.17.102
 ```
+```bash
+ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 `
+    -L 15901:127.0.0.1:5901 -p 20465 u2024210044@10.160.17.102
+```
 
 服务器地址和 SSH 端口沿用原文档；平台重新分配地址后需替换。本机 `15901` 被占用时，换一个空闲端口，并同步修改 Viewer 地址。
 
