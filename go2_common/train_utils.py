@@ -43,7 +43,11 @@ class EvalMetricsCallback(BaseCallback):
         self.eval_freq = eval_freq
         self.n_episodes = n_episodes
         self.save_dir = pathlib.Path(save_dir)
-        self.best_reward = -np.inf
+        # best_model 的选取键：**(成功率, 平均回报)**，字典序比较。
+        # 台阶阶段的实测（AGENT.md §5-B9）：卡在台阶上踏步的策略回报 1519，
+        # 成功登顶的只有 1215——只按回报选会选出"不动的"模型（实测 0/8 vs 6/8）。
+        # flat / steps 这类没有成功的阶段成功率恒为 0，比较自然退化成"看回报"。
+        self.best_selection = (-np.inf, -np.inf)
         self.last_eval = 0
         self.save_buffer = save_buffer
 
@@ -112,8 +116,13 @@ class EvalMetricsCallback(BaseCallback):
                 + ("  ⚠回合全在100步内结束" if short_episodes else "")
             )
 
-        if mean_reward > self.best_reward:
-            self.best_reward = mean_reward
+        success_rate = n_success / self.n_episodes
+        selection = (success_rate, mean_reward)
+        if selection > self.best_selection:
+            self.best_selection = selection
+            if self.verbose:
+                print(f"  [best] 保存 best_model：成功率 {n_success}/{self.n_episodes}  "
+                      f"回报 {mean_reward:.1f}")
             self.save_dir.mkdir(parents=True, exist_ok=True)
             if self.save_buffer:
                 self.model.save_replay_buffer(str(self.save_dir / "best_model.pkl")) # 方便加载取相同名字，实际best_model.pkl为replay buffer

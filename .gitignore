@@ -19,3 +19,4 @@ tmp.sh
 .pytest_cache/
 .recon/
 fix_log/
+AGENT.md

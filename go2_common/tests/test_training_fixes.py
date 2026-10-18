@@ -304,7 +304,7 @@ class EvaluationTests(unittest.TestCase):
                                            eval_freq=1, n_episodes=2, save_dir=tmp)
             self.addCleanup(callback.eval_env.close)
             callback.num_timesteps = 1
-            callback.best_reward = np.inf
+            callback.best_selection = (np.inf, np.inf)
             logger = configure(folder=tmp, format_strings=[])
             callback.model = SimpleNamespace(logger=logger)
             episode_levels = iter(([0, 2, 1, 0], [0, 1, 0]))
@@ -338,7 +338,7 @@ class EvaluationTests(unittest.TestCase):
                                            eval_freq=1, n_episodes=1, save_dir=tmp)
             self.addCleanup(callback.eval_env.close)
             callback.num_timesteps = 1
-            callback.best_reward = np.inf
+            callback.best_selection = (np.inf, np.inf)
             logger = configure(folder=tmp, format_strings=[])
             callback.model = SimpleNamespace(logger=logger)
 

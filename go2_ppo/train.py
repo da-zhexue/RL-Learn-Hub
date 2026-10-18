@@ -144,6 +144,17 @@ def parse_args(argv=None):
                    help="每次评估跑几个回合。**默认 20，别往小调**（理由见 AGENT.md §5-D2）")
     p.add_argument("--checkpoint-freq", type=int, default=None, metavar="N",
                    help="每 N 个环境步存一个 checkpoint（默认 200000）")
+    # 单阶段改奖励权重不用动默认值（台阶阶段要把平地塑形项衰减，否则"卡在台阶上踏步"
+    # 也能拿 ~1.4/步的保底收入，实测 1.0 阶段因此 0/20，见 AGENT.md §5-B9）。
+    _rw = p.add_argument_group("奖励权重覆盖（在 --fresh-reward 之后生效）")
+    _rw.add_argument("--reward-feet-clearance", type=float, default=None, metavar="W")
+    _rw.add_argument("--reward-feet-air-time", type=float, default=None, metavar="W")
+    _rw.add_argument("--reward-foot-swing-height", type=float, default=None, metavar="W")
+    _rw.add_argument("--reward-climb", type=float, default=None, metavar="W")
+    _rw.add_argument("--reward-level-bonus", type=float, default=None, metavar="W")
+    _rw.add_argument("--reward-orientation", type=float, default=None, metavar="W",
+                     help="机身水平惩罚（默认 -0.5）。台阶阶段失败多是 |roll|/|pitch|≈1.0 翻转，"
+                          "加到 -1.5~-2.5 能提前把姿态压住")
     p.add_argument("--torch-threads", type=int, default=TrainCfg.torch_threads)
     return p.parse_args(argv)
 
@@ -201,6 +212,20 @@ def main(argv=None):
         if args.action_scale is not None:
             env_cfg.action_scale = args.action_scale
         reward_cfg = RewardCfg()
+
+    # 奖励权重覆盖：放在 resume / 新建两分支之后、写 config.json 之前，
+    # 这样 --fresh-reward + 覆盖值 一定落到 config.json 里，play 时也能还原。
+    for _name, _val in (
+        ("feet_clearance", args.reward_feet_clearance),
+        ("feet_air_time", args.reward_feet_air_time),
+        ("foot_swing_height", args.reward_foot_swing_height),
+        ("climb", args.reward_climb),
+        ("level_bonus", args.reward_level_bonus),
+        ("orientation", args.reward_orientation),
+    ):
+        if _val is not None:
+            setattr(reward_cfg, _name, float(_val))
+            print(f"  奖励覆盖：{_name} = {_val}")
 
     # 课程缩放的档位写进目录名，免得同一个地形下 s0.6 和 s1 的模型混在一起分不清
     scale_tag = "" if env_cfg.terrain_scale == 1.0 else f"_s{env_cfg.terrain_scale:g}"
