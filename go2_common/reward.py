@@ -46,6 +46,8 @@ class RewardInput:
     foot_vx: np.ndarray  # 脚的世界系前向速度，用来判断"在迈步"而不是站着抬脚
     foot_air: np.ndarray  # 脚是否离地（不接触地形）
     clearance_target: float  # 本回合的目标离地间隙（由地形高度算出）
+    foot_air_time: np.ndarray  # 本次摆动时长：**只在该脚落地那一步**非零，否则 0
+    foot_clearance_ema: np.ndarray  # 每只脚离地高度的低通滤波（拖地脚会明显偏低）
 
 
 # ------------------------------------------------------------------ 前进 / 高度
@@ -101,6 +103,38 @@ def _feet_clearance(r: RewardInput, cfg: RewardCfg) -> float:
     gate = np.asarray(r.foot_air, dtype=bool) & (np.asarray(r.foot_vx) > cfg.clearance_vx)
     lift = np.minimum(np.maximum(np.asarray(r.foot_clearance), 0.0), r.clearance_target)
     return float(np.sum(np.where(gate, lift, 0.0)))
+
+
+def _feet_air_time(r: RewardInput, cfg: RewardCfg) -> float:
+    """摆动**时长**奖励：一只脚落地时结算它这次离地了多久（封顶 air_time_target）。
+
+    和 `_feet_clearance` 互补：clearance 管"抬多高"，这一项管"离地多久"。
+    两者都只认"真的迈出去"的脚，但关键区别是：这一项**按落地事件结算**，
+    一条从不落地的拐杖腿永远拿不到分（实测 2026-10-17：逐脚求和的 clearance
+    会被"三条腿跳、RR 当拐杖"刷，见 AGENT.md §5-B9）。
+    指令太小时整项归零：站着原地抬脚不该有收益（legged_gym 同款闸门）。
+    """
+    if abs(float(r.cmd_vx)) < cfg.air_time_cmd_gate:
+        return 0.0
+    return float(np.sum(np.minimum(np.asarray(r.foot_air_time), cfg.air_time_target)))
+
+
+def _foot_swing_height(r: RewardInput, cfg: RewardCfg) -> float:
+    """**最差那只脚**的"近期平均离地高度"——瓶颈式抬脚塑形，专门反"牺牲一条腿"。
+
+    为什么不能用求和：逐脚求和的 `_feet_clearance` 在"牺牲 RR 当拐杖、三条腿跳"时
+    只损失 1/4 的分，实测 PPO 就选了这条路（RR 100% 时间 <0.005 m，另外三只抬到
+    0.10~0.15 m，见 AGENT.md §5-B9）。这里取**四只脚的最小值**，最差的那只决定整项，
+    必须四条腿都周期性抬起来才拿得到分。
+
+    用 EMA 而不是瞬时 clearance：贴地脚也有 20~30% 的步被接触判断为"离地"，但只有
+    1~2 mm——瞬时量会被这种抖动骗过去。alpha=0.995 在 50 Hz 下时间常数约 4 s，
+    所以"抬一次然后一直拖着"最多吃几秒分，之后必须再抬。
+    """
+    if abs(float(r.cmd_vx)) < cfg.air_time_cmd_gate:
+        return 0.0
+    ema = np.minimum(np.asarray(r.foot_clearance_ema), cfg.clearance_target)
+    return float(np.min(ema))
 
 
 def _base_height(r: RewardInput, cfg: RewardCfg) -> float:
@@ -180,6 +214,8 @@ TERMS = (
     ("climb", _climb),
     ("level_bonus", _level_bonus),
     ("feet_clearance", _feet_clearance),
+    ("feet_air_time", _feet_air_time),
+    ("foot_swing_height", _foot_swing_height),
     ("base_height", _base_height),
     ("lateral", _lateral),
     ("lateral_vel", _lateral_vel),

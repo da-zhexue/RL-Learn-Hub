@@ -316,12 +316,18 @@ def cmd_policy(argv):
     cfg.terrain, cfg.terrain_scale = terrain, scale
     env = Go2TerrainEnv(cfg, RewardCfg())
     ids, tr = foot_ids(env), {n: [] for n in FOOT_GEOM_NAMES}
+    base, belly, n_stance = [], [], []
     for ep in range(3):
-        def on_step(e):
+        def on_step(e, _base=base, _belly=belly, _nstance=n_stance):
             # 用**逐脚**正下方的地形：机身 x 在台阶上方时 terrain.top(机身) 已经是台阶顶，
             # 拿它当基准会把还在平地上的脚算高一整级（老口径的 bug）。
             for n, i in zip(FOOT_GEOM_NAMES, _order_of(e, ids)):
                 tr[n].append(float(e.foot_clearance()[i]))
+            # 机身/肚子高度与触地模式：只看 clearance 会被"一条腿拖地、三条腿跳"骗过去
+            # （实测 2026-10-17：四脚 clearance 里三只 >0.10，但 RR 100% 贴地、机身只有 0.198）。
+            _base.append(float(e.data.qpos[2]) - e._support_height())
+            _belly.append(belly_clearance(e))
+            _nstance.append(int(np.sum(~e._foot_state()[2])))  # air=True 是离地，取反 = 着地数
         run_episode(env, policy_act(model), seed=300 + ep, on_step=on_step)
     print(f"{path}  地形={terrain} scale={scale}\n")
     for n, v in tr.items():
@@ -329,7 +335,12 @@ def cmd_policy(argv):
         print(f"  {n}: 最高 {v.max():.3f}  中位 {np.median(v):.3f}  "
               f"贴地(<0.03)时间占比 {(v < 0.03).mean() * 100:5.1f}%  "
               f"达到目标 {env.clearance_target:.3f} 的占比 {(v >= env.clearance_target).mean() * 100:5.1f}%")
-    print("\n跨 8 cm 的槛要抬到 0.102 m。后腿抬不起来 = 前腿上了槛、后腿跟不上，卡成跨坐姿势。")
+    b, bl, ns = np.array(base), np.array(belly), np.array(n_stance)
+    print(f"  机身离支撑面: 均值 {b.mean():.3f}  最低 {b.min():.3f} m（target "
+          f"{env.reward_cfg.height_target:.2f}，死区 ±{env.reward_cfg.height_dead_zone:.2f}）")
+    print(f"  肚子最低点离地: 均值 {bl.mean():.3f}  最低 {bl.min():.3f} m")
+    print("  触地模式: " + "  ".join(f"{k}脚着地 {(ns == k).mean() * 100:5.1f}%" for k in range(5)))
+    print("\n跨 8 cm 的槛要抬到 0.102 m；四只脚都要抬，只有三只抬 = 另一条腿在当拐杖。")
     env.close()
     return 0
 

@@ -59,14 +59,14 @@ class Go2TerrainEnv(GymEnv):
             else np.inf
         )
         self.max_steps = int(round(self.cfg.max_episode_s / (self.cfg.sim_dt * self.cfg.decimation)))
-        # 抬脚奖励的目标高度：默认按地形最高一级台阶自动算（课程缩放时自动跟着变），
-        # 地形没有台阶（flat/steps）时 = 0，等于关闭这一项（见 reward._feet_clearance）。
+        # 抬脚奖励的目标高度：台阶地形按最高一级台阶自动算（课程缩放时自动跟着变）。
+        # **显式 clearance_target 是下限、不是覆盖**：flat 没有台阶，自动值 = 0，
+        # 旧代码于是把平地这一项整个关掉（平地 PPO 模型因此学会拖地，见 RewardCfg.feet_clearance）；
+        # 台阶地形又必须随课程缩放，所以取 max(显式值, 台阶高 + margin)。
         _tops = self.terrain.stair_tops
         _rise = max((b - a for a, b in zip(_tops, _tops[1:])), default=0.0)
-        self.clearance_target = float(
-            self.reward_cfg.clearance_target if self.reward_cfg.clearance_target > 0.0
-            else (_rise + self.reward_cfg.clearance_margin if _tops else 0.0)
-        )
+        _auto = float(_rise + self.reward_cfg.clearance_margin) if _tops else 0.0
+        self.clearance_target = max(float(self.reward_cfg.clearance_target), _auto)
         self.dt = self.cfg.sim_dt * self.cfg.decimation
 
         self._build_index_maps()
@@ -95,6 +95,10 @@ class Go2TerrainEnv(GymEnv):
         self.prev_terrain_h = 0.0
         self.prev_climb_h = 0.0
         self.prev_foot_x = None  # 上一拍四只脚的世界系 x，用来算脚的前向速度
+        # 逐脚计时/滤波：摆动时长奖励按"落地事件"结算；离地高度取 EMA（贴地脚也会
+        # 有 20~30% 的步被判"离地"但只有 1~2 mm，瞬时量抓不住，见 reward._foot_swing_height）。
+        self.foot_air_time = np.zeros(len(FOOT_GEOM_NAMES), dtype=np.float64)
+        self.foot_clear_ema = np.zeros(len(FOOT_GEOM_NAMES), dtype=np.float64)
         self.prev_terrain_level = 0  # Highest level reached before the current step.
         self.step_count = 0
 
@@ -298,6 +302,8 @@ class Go2TerrainEnv(GymEnv):
         self.prev_terrain_h = self._support_height()
         self.prev_climb_h = self._climb_height(self.prev_terrain_h)
         self.prev_foot_x = self.data.geom_xpos[self.foot_geom_ids][:, 0].copy()
+        self.foot_air_time[:] = 0.0
+        self.foot_clear_ema[:] = 0.0
         self.prev_terrain_level = self.terrain.level_at_height(self.prev_terrain_h)
 
         info = {
@@ -333,6 +339,17 @@ class Go2TerrainEnv(GymEnv):
         climb_h = self._climb_height(terrain_h)
         terrain_level = self.terrain.level_at_height(terrain_h)
         foot_clearance, foot_vx, foot_air, foot_x = self._foot_state()
+        # 逐脚计时（顺序同 foot_geom_ids）：
+        #   landed_air_time = 本步刚落地那只脚的"本次离地时长"（先取，后面要清零）
+        #   foot_clear_ema   = 脚底离地高度的低通滤波，时间常数由 cfg.clearance_ema_alpha 定
+        _air = np.asarray(foot_air, dtype=bool)
+        landed_air_time = np.where(~_air & (self.foot_air_time > 0.0), self.foot_air_time, 0.0)
+        self.foot_air_time = np.where(_air, self.foot_air_time + self.dt, 0.0)
+        _a = float(self.reward_cfg.clearance_ema_alpha)
+        self.foot_clear_ema = (
+            _a * self.foot_clear_ema
+            + (1.0 - _a) * np.clip(np.asarray(foot_clearance, dtype=np.float64), 0.0, 0.2)
+        )
 
         success = terrain.is_success(cfg, base_pos)
         terminated = bool(
@@ -369,6 +386,8 @@ class Go2TerrainEnv(GymEnv):
             foot_vx=foot_vx,
             foot_air=foot_air,
             clearance_target=self.clearance_target,
+            foot_air_time=landed_air_time,
+            foot_clearance_ema=self.foot_clear_ema.copy(),
         )
         reward, parts = compute_reward(r, self.reward_cfg)
 

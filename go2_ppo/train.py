@@ -36,7 +36,7 @@ if __package__ in (None, ""):
 
 import torch  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
-from stable_baselines3.common.callbacks import CheckpointCallback  # noqa: E402
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback  # noqa: E402
 from stable_baselines3.common.utils import FloatSchedule  # noqa: E402
 from stable_baselines3.common.vec_env import SubprocVecEnv  # noqa: E402
 
@@ -68,6 +68,24 @@ def _lr_or_clip_value(v) -> float:
     `BaseAlgorithm.__init__` 只是把它存下来）。所以先判断能不能调用再取值。
     """
     return float(v(1.0)) if callable(v) else float(v)
+
+
+class ClampLogStdCallback(BaseCallback):
+    """Keep the unsquashed Gaussian standard deviation in a safe range."""
+
+    def __init__(self, lower: float, upper: float):
+        super().__init__(verbose=0)
+        self.lower = float(lower)
+        self.upper = float(upper)
+
+    def _on_rollout_start(self) -> None:
+        log_std = getattr(self.model.policy, "log_std", None)
+        if log_std is not None:
+            with torch.no_grad():
+                log_std.clamp_(self.lower, self.upper)
+
+    def _on_step(self) -> bool:
+        return True
 
 
 def parse_args(argv=None):
@@ -329,6 +347,7 @@ def main(argv=None):
             name_prefix="rl",
             verbose=0,
         ),
+        ClampLogStdCallback(train_cfg.log_std_min, train_cfg.log_std_max),
         EvalMetricsCallback(
             env_cfg, reward_cfg, train_cfg.eval_freq, train_cfg.eval_episodes,
             save_dir=run_dir / "best", verbose=1,

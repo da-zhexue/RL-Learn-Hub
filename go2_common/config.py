@@ -166,7 +166,13 @@ class RewardCfg:
     track_lin_vel: float = 1.0  # 速度跟踪（步态质量，金额很小）
     climb: float = 340.0
     level_bonus: float = 20.0  # 每登上一级新台阶的一次性奖励，离散信号比连续势能好认
-    base_height: float = -0.3  # **惩罚**：离当地地形的高度偏差（项函数返回 |err|），站对了是 0
+    # **惩罚**：离当地地形的高度偏差（项函数返回 |err|），站对了是 0。
+    # 10M 步 PPO 平地模型的实测 base 只有 0.190 m（离 target 0.27 差 0.073），但旧值
+    # -0.3 × (0.073−0.05 死区) = **-0.007/步**，相对 track_lin_vel 的 +0.93/步 等于没有代价，
+    # 于是"低蹲 + 拖脚"成了免费解（肚子最低点 0.087 m，比 0.08 m 的槛只高 7 mm）。
+    # 实测 -1.5 热身 1.5M 步只把机身从 0.190 抬到 0.218，且开始往 1.47× 速度的三腿跳漂，
+    # 所以再加一档到 -3.0；要更快见效就单独先做一节"站高"课，再打开 feet_clearance。
+    base_height: float = -3.0
     lateral: float = 0.0
     lateral_vel: float = -5.0
 
@@ -180,7 +186,24 @@ class RewardCfg:
     # 完全没有梯度：狗在 0.06~0.09 m 的台阶上用小碎步就够了，而 0.15 m 需要
     # 完全不同的步态（前脚要抬到 0.17 才落得上顶面），稀疏的 climb/success
     # 信号在"抬不够高"时给不出任何方向。权重不宜大：抬脚本身不是任务。
-    feet_clearance: float = 0.0
+    #
+    # 2026-10-17 实测（平地 PPO 13M 步）：这一项一直是 0，因为 flat 没有台阶 ->
+    # clearance_target=0 -> 函数直接 return 0，而权重本身又是 0 -> 双重关闭。
+    # 结果 RR 脚 100% 时间 <0.005 m（纯拖地），抬得最高的 FL 只有 0.062 m。
+    # 所以平地也必须开：显式 clearance_target=0.08，权重 3.0（2 只摆动腿抬满
+    # 约 +0.4/步，与 track_lin_vel 的 +0.93/步 同一量级，不会盖过速度）。
+    feet_clearance: float = 3.0
+    # 摆动**时长**奖励（落地时结算本次离地时长，封顶 air_time_target）。
+    # 为什么还要这一项：clearance 是逐脚求和的，实测会被"牺牲 RR 当拐杖、三条腿跳"刷分
+    # （RR 100% 时间贴地还照样拿其余三条腿的分）。按落地事件结算 + 下面的着地超时罚，
+    # 才逼四条腿都真正迈步。量级：trot 每条腿一次落地约 0.25~0.35 s × 6 ≈ 1.5~2.1，
+    # 4 条腿 / 一个 0.6 s 周期 -> 约 +0.2/步。
+    feet_air_time: float = 6.0
+    # **瓶颈式**抬脚塑形：四只脚里"近期平均离地高度"最低的那只决定这一项（见
+    # reward._foot_swing_height）。用来堵逐脚求和的漏洞——实测 PPO 会把 RR 当拐杖、
+    # 三条腿跳，牺牲一条腿只损失 1/4 的求和分。量级：trot 四脚 EMA 约 0.03~0.05 m
+    # -> +0.3~0.5/步；拐杖腿 EMA≈0.001 -> 基本拿不到。
+    foot_swing_height: float = 10.0
     # --- 平滑 / 能耗
     action_rate: float = -0.05
     torques: float = -1e-4
@@ -192,8 +215,8 @@ class RewardCfg:
 
     # --- 各项的内部参数
     track_sigma: float = 0.1
-    height_target: float = 0.27  # 站立时 base 离地高度
-    height_dead_zone: float = 0.05  # 高度偏差的死区（为什么需要见 AGENT.md §5-B4）
+    height_target: float = 0.29  # 站立时 base 离地高度（diag stance：标称站姿可稳到 0.33）
+    height_dead_zone: float = 0.02  # 高度偏差的死区（为什么需要见 AGENT.md §5-B4）
     collision_force_free: float = 25.0  # 接触力的免罚底噪，牛顿（见 AGENT.md §5-B4）
     climb_gamma: float = 1.0  # climb 项的折扣，**必须为 1.0**（推导见 AGENT.md §5-B2）
     progress_y_gate: float = 1.25  # 前进奖励的走廊宽度闸门（防刷分，见 AGENT.md §5-B5）
@@ -203,7 +226,13 @@ class RewardCfg:
     #              要三只脚上去才给分。对 0.15 m 这种高台阶，这一段就是"没有梯度"。
     #   "mean"   = 四只脚的平均。两只前脚搭上台阶就给一半的分，credit 分配平滑得多。
     climb_stat: str = "median"
-    clearance_target: float = 0.0  # 目标离地间隙 (m)；0 = 按地形最高一级台阶自动算
+    # 目标离地间隙 (m)。**显式给一个平地也能用的值**：0 表示"按地形最高一级台阶自动算"，
+    # 而 flat/steps 之外只有 full 有台阶，平地训出的就是 target=0 = 没有抬脚梯度。
+    # 0.08 = steps 的槛高；台阶地形取 max(它, 台阶高+margin)，见 env.Go2TerrainEnv.__init__。
+    air_time_target: float = 0.35  # 摆动时长奖励的封顶（再久不加分，防止刻意拖长）
+    air_time_cmd_gate: float = 0.10  # |cmd_vx| 小于它时 feet_air_time 整项归零
+    clearance_ema_alpha: float = 0.995  # 逐脚 clearance 的 EMA 系数；50 Hz 下时间常数约 4 s
+    clearance_target: float = 0.08
     clearance_margin: float = 0.02  # 自动目标 = 台阶高度 + 它
     clearance_vx: float = 0.02  # 脚的前向速度超过它才算"在迈步"，站着抬脚不给分
 

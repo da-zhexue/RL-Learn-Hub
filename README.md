@@ -208,6 +208,9 @@ python3 -m go2_sac.play --mode viewer --model models/go2_sac_full_xxx/model.zip
 | climb | `Δ地形高度`（不是 Δ机身高度） | +340 /米 | 爬高，爬完六级 +57 |
 | level_bonus | 超过本回合此前最高级的新增级数 | +20 | 出生级数不发奖，退下来再上同一级不重复发放 |
 | track_lin_vel | `max(0, e^{-(vx-cmd)²/σ²} − e^{-cmd²/σ²})` | +1.0 | 步态质量（金额很小） |
+| feet_clearance | 摆动腿抬到 `clearance_target` 之前的正奖励，只算"离地且正在前迈"的脚 | +3.0 | 平地显式 target=0.08；台阶地形取 max(0.08, 台阶高+0.02) |
+| feet_air_time | 每只脚**落地**时结算本次离地时长，封顶 `air_time_target=0.35 s` | +6.0 | 按落地事件结算：从不落地的"拐杖腿"拿不到分 |
+| foot_swing_height | 四只脚里**近期平均离地高度最低**的那只（EMA，时间常数约 4 s） | +10.0 | 瓶颈式塑形：只牺牲一条腿时整项归零，逼四条腿都周期性抬起 |
 | success | 站上顶平台 = 1（终止） | +450 | |
 
 **惩罚项（姿态 / 平滑 / 能耗）**
@@ -216,7 +219,7 @@ python3 -m go2_sac.play --mode viewer --model models/go2_sac_full_xxx/model.zip
 | --- | --- | --- | --- |
 | yaw | `1−cos(yaw)` | −1.0 | 航向对准 |
 | orientation | `(1−cos roll)+(1−cos pitch)` | −0.5 | 机身保持水平 |
-| base_height | `max(0, \|z−h−0.27\| − 0.05)` | −0.3 | 站太低或太高 |
+| base_height | `max(0, \|z−h−0.29\| − 0.02)` | −3.0 | 站太低或太高（0.29 来自 diag stance：标称站姿可稳到 0.33；−1.5 实测压不住低蹲，见 AGENT.md §5-B9） |
 | lateral_vel | `vy_world²` | −5.0 | 别横漂（世界系，是下面 `lateral` 的时间导数；观测加了航向后这一项才可学） |
 | yaw_rate | `ωz²` | −0.25 | 别原地打转 |
 | action_rate | `‖aₜ−aₜ₋₁‖²` | −0.05 | 动作别抖 |
@@ -224,7 +227,9 @@ python3 -m go2_sac.play --mode viewer --model models/go2_sac_full_xxx/model.zip
 | torques | `Στ²` | −1e-4 | 省力矩 |
 | fall | 摔倒/出界终止 = 1（成功不算） | −25 | 终止项 |
 
-内部参数：`track_sigma 0.1`、`height_target 0.27`、`height_dead_zone 0.05`、
+内部参数：`track_sigma 0.1`、`height_target 0.29`、`height_dead_zone 0.02`、
+`clearance_target 0.08`（下限）、`clearance_margin 0.02`、`clearance_vx 0.02`、
+`air_time_target 0.35`、`air_time_cmd_gate 0.10`、`clearance_ema_alpha 0.995`、
 `collision_force_free 25 N`、`climb_gamma 1.0`、`progress_y_gate 1.25`、`progress_x_cap 3.5`。
 
 **设置奖惩需要注意的事项**

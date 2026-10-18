@@ -439,6 +439,72 @@ replace `lateral` (y²) with `lateral_vel` (world-frame vy²).**
   post-reset observations initialize their spawn levels. Old buffers' repeated
   rewards are not automatically relabeled.
 
+**B9: On flat terrain the foot-lift term is disabled twice over; turning it on
+alone trains a three-legged hop that sacrifices one leg (measured 2026-10-17,
+PPO).**
+- Symptom: a 13M-step flat PPO policy walks 10 m+ at 0.65 m/s but the base sits
+  at **0.190 m**, the belly minimum is **0.065–0.093 m** (the two low obstacles
+  are 0.08 m), and per-foot clearance maxima are **FL 0.068 / FR 0.074 /
+  RL 0.025 / RR 0.002** (RR below 0.005 for 100% of steps). Crossing an 0.08 m
+  threshold needs ~0.10 m of foot-bottom clearance.
+- Why that gait is optimal: `feet_clearance` returns exactly 0 for **two
+  independent reasons** — the weight was 0.0 *and* `clearance_target` is 0 on
+  flat (the automatic target exists only when `terrain.stair_tops` is
+  non-empty; the `steps` thresholds sit with their bottom at z=0, so they are
+  not counted either). `base_height` costs `0.3 × (0.073 − 0.05) =
+  0.007/step` against `track_lin_vel`'s +0.93/step: crouching is free.
+  Note also that `progress` is capped at x=3.5 m, so after ~5 s of a 20 s
+  episode the only task reward left is velocity tracking.
+- Change (now the defaults in `RewardCfg`/`env.py`): `feet_clearance` 0→3,
+  `clearance_target` 0→0.08 with the env taking **max(explicit, stair rise +
+  margin)** so stairs still scale, `height_target` 0.27→0.29,
+  `height_dead_zone` 0.05→0.02, `base_height` −0.3→−3.0 (−1.5 was tried
+  first: after 1.5M warm-started steps the base only moved 0.190→0.218 and the
+  gait started drifting into a 1.47×-speed hop, so the weight was raised
+  again). Everything else untouched so the effect is attributable.
+- Result after 1M warm-started steps from `go2_ppo_flat/best`: FL clearance max
+  0.062→**0.152** (p50 0.017→0.068), FR 0.021→0.127, RL 0.020→0.104 — the
+  shaping direction is right, and the term went from 0.065 to 0.126 per step.
+  **But RR stayed at 0.002 (100% <0.005)** and the gait became a **three-legged
+  hop with RR as a peg leg**: 1 foot on the ground 45.6% of steps, 4 feet
+  airborne 8–14%, **69% of actions saturated at |a| > 0.95**, speed 0.86×, base
+  height still 0.199.
+- Lesson: a per-foot **sum** of clearance is farmable by sacrificing one leg,
+  and body height does **not** follow the foot-lift reward — it needs its own
+  weight or its own stage.
+- **Second attempt (the current defaults, "step 1"): make every foot swing.**
+  Added two terms and kept the sum:
+  * `feet_air_time` (+6.0): on each **landing**, pay `min(air_time, 0.35 s)`;
+    zero when `|cmd| < 0.1`. A leg that never lands earns 0. Measured on the
+    open-loop trot: +0.278/step; standing still: +0.006/step.
+  * `foot_swing_height` (+10.0): the **minimum over the four feet** of the
+    per-foot EMA of clearance (alpha 0.995, time constant ≈4 s, capped at
+    `clearance_target`). A sum is hopeless here — the measured peg-leg policy
+    scores 0.2467/step from three feet alone, so lifting the fourth buys only
+    +0.06; with the min form the peg-leg policy scores **0.0095/step** and a
+    real trot **0.15/step**. EMA is essential: the dragging foot is judged
+    "airborne" 20–30% of steps, so instantaneous clearance is fooled.
+  Why not a stance-duration penalty: measured max continuous stance was only
+  **0.26 s** even for the dragging foot (contact flickers), so a 0.4 s
+  threshold never fires. Verification: on the open-loop trot the three terms
+  are +0.244 / +0.278 / +0.150 per step; the peg-leg policy gets
+  +0.247 / +0.274 / **+0.010**.
+- Result after **2M warm-started steps** (`models/go2_ppo_flat_gait3`, flat):
+  base **0.197→0.240 m** (p50 0.252), belly 0.080→0.134 m, speed ratio
+  1.06×→1.01×, eval return 1095→1647. The bottleneck term did what it was
+  meant to: rear feet went from 26% airborne to **51% (RR) / 80% (RL)**, and
+  RR max clearance rose 0.002→**0.038 m**; front feet overshot to 0.17/0.35 m
+  and the gait became a bounding gait (4 feet airborne **41%** of steps).
+  Still short of the 0.08 m target at the rear feet, so flat training was
+  continued (`gait4`). Note the front feet are rewarded only up to
+  `clearance_target`, so the overshoot is not paid for — one more reason to
+  add a symmetric foot-height penalty or a phase constraint later.
+- Still to try, in order: (b) `base_height` −4~−5, or a short "stand up
+  first" phase; (c) `ent_coef` 0.005~0.01 and `log_std_min` −2→−1 (σ floor
+  0.135 is too narrow to escape a 69%-saturated local optimum); (d) only then
+  move to `steps`/full. Verification command: `python -m go2_ppo.diag policy
+  <model> flat 1.0` now also prints base/belly height and the contact pattern.
+
 ### C. Simulation / Geometry
 
 **C1: Spawn height must use the maximum terrain height over the robot's whole

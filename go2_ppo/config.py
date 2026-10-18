@@ -19,7 +19,8 @@ class TrainCfg:
     seed: int = 0
 
     # --- PPO
-    learning_rate: float = 3e-4
+    # Conservative step size for the current reward scale.
+    learning_rate: float = 1e-4
     # **256，不是 SB3 默认的 2048。** 策略 50 Hz、回合上限 20 s = 1000 步，
     # 2048 步是 41 s —— 比整个回合还长，一轮 rollout 里同一个回合的陈旧数据反复出现，
     # 优势估计基本失效。256 步 = 每个环境采 5.12 s，是回合长的四分之一到一半。
@@ -28,7 +29,8 @@ class TrainCfg:
     # 256·k ÷ 256 = k，换 --n-envs 不会冒出 SB3 那个"最后一个不满的 minibatch"警告。
     batch_size: int = 256
     # 一轮样本做 5 × 8 = 40 次梯度更新，与 legged_gym 同量级。
-    n_epochs: int = 5
+    # Fewer passes reduce drift on the same on-policy rollout.
+    n_epochs: int = 3
     # 视野约 4 s，和 SAC 一致。0.99 只有 2 s，规划不了"助跑-抬腿-上台阶"这一串动作。
     gamma: float = 0.995
     gae_lambda: float = 0.95  # GAE 的标准值
@@ -38,14 +40,18 @@ class TrainCfg:
     clip_range_vf: float | None = None
     # 熵奖励。PPO 的初始 σ=1.0（= legged_gym 的 init_noise_std），本来就远大于
     # SAC 崩掉后的 σ≈0.25，所以熵不是"救探索"的主旋钮；给一点是防过早收敛到局部最优。
-    ent_coef: float = 0.005
+    # The unsquashed Gaussian is clipped at the env boundary; avoid entropy-driven variance growth.
+    ent_coef: float = 0.0
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     # 早停阀：某次更新里 approx_kl > 1.5 × 0.02 就停掉本轮剩下的 epoch。
     # 这个仓库的历史就是"微调把策略训坏"，多一道保险。None = 关闭。
-    target_kl: float | None = 0.02
+    target_kl: float | None = 0.01
     net_arch: tuple = (256, 256)
-    log_std_init: float = 0.0  # σ=1.0
+    # Start with moderate exploration; the callback also bounds learned log_std.
+    log_std_init: float = -1.0
+    log_std_min: float = -2.0
+    log_std_max: float = 0.0
 
     # --- 运行
     # 子进程各占 1 线程跑物理，父进程这一项给 torch 的梯度更新用（同 go2_sac）。
