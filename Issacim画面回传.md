@@ -29,6 +29,10 @@ VirtualGL 的 EGL 后端已能访问 GPU，无需启动额外的 Xorg，也无�
 ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
     -L 15901:127.0.0.1:5901 -p 20465 u2024210044@10.160.17.102
 ```
+```bash
+ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 `
+    -L 15901:127.0.0.1:5901 -p 20465 u2024210044@10.160.17.102
+```
 
 服务器地址和 SSH 端口沿用原文档；平台重新分配地址后需替换。本机 `15901` 被占用时，换一个空闲端口，并同步修改 Viewer 地址。
 
@@ -223,6 +227,7 @@ sudo sv -w 15 restart /etc/service/turbovnc-u2024210044
 | Viewer 连接被拒绝 | 检查隧道是否存活、本机端口是否冲突，以及 `sv status` / 5901 监听 |
 | 密码不正确 | 修改过密码后不要继续用初始密码文件；Viewer 地址使用双冒号 |
 | 桌面有了但训练窗口没有 | 使用 `isaac-vnc-run`，指定 `--visualizer kit --livestream 0`，检查 `HEADLESS` |
+| 狗在画面中凭空上飘、跳动或与物理位置不一致 | 用最新的 `train.py` / `play.py`；脚本已关闭 RTX geometry streaming 和 Fabric 动态变换读取，旧进程必须重启 |
 | 启动时视口黑屏 | 等待 `app ready`；本次完整初始化约 113 秒，然后才加载测试场景 |
 | NVIDIA Vulkan 设备不可见 | 检查 `nvidia-smi`、ICD 路径和图形库与宿主机驱动是否匹配 |
 | OpenGL 变成 llvmpipe | 确认使用 `vglrun -d egl`；不要据此判断 Isaac Sim 的 Vulkan 状态 |
@@ -237,4 +242,5 @@ sudo sv -w 15 restart /etc/service/turbovnc-u2024210044
 - 已运行真实 Isaac Sim 6.1 窗口，创建旋转绿色方块、地面、灯光与相机；VNC 协议接收的截图中确认了 RTX 3D 场景，测试正常退出。
 - `go2_issac/train.py --terrain flat --steps 2048 --num-envs 4 --mini-batches 4 --max-iterations 2 --visualizer kit --livestream 0` 正常完成 2 次 PPO 迭代、2048 步并保存 checkpoint；测试输出在 `/tmp/isaac-vnc-training-check`，日志在 `/tmp/isaac-vnc-training-check.log`。此短时测试验证运行与显示通道，不代表策略收敛。
 - 已测试 `sv restart`，服务重新监听 `127.0.0.1:5901`，当前保持运行。
+- Isaac Sim 6.1 的启动日志曾报告动态物体 geometry streaming 与 Fabric transform 读取同时开启，可能导致机器人渲染位置滞后。`go2_issac/train.py` 和 `play.py` 现在默认加入 `--/rtx/hydra/geometryStreaming/enabled=false` 与 `--/rtx/hydra/readTransformsFromFabricInRenderDelegate=false`；这只影响视口同步，不改变物理。
 - 本机到服务器的 SSH 隧道仍需在本机建立，没有从用户本机验证网络连通性。
