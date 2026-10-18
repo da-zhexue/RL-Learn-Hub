@@ -252,3 +252,45 @@ python3 -m go2_sac.play --mode viewer --model models/go2_sac_full_xxx/model.zip
 ### 结论
 2026年10月16日结束SAC训练，不加入高层的地形观测量最终大概会卡在full0.6到full0.8的高度，且SAC受是否有地形观测的影响更大，之后准备转入PPO并加上地形观测，分别在mujoco+gym、mjlab、issaclab三种环境上进行训练，同时学习传统控制方法。SAC训练中比较有效的是可以把其他策略跑出来的成果存入replay buffer作为专家示范，可以让SAC迅速学会我想要的一个基本的效果再在这基础上微调。  
 2026年10月18日完成PPO训练，成功爬上了full1.0的台阶。PPO训练时最开始就增加了地形观测，并在发现狗在平地阶段会学会靠一条腿拖着其他三条腿动后增加了对抬腿时间和最低的脚的离地高度的奖励，显著改善了狗的步态，再逐渐提高台阶高度后能够成功上去。PPO正常情况下无法进行专家示范，最难的就是让它学会正常步态，只能通过调整奖励来达到这一点，不过后面上台阶就比SAC顺利很多了。
+
+## mjlab强化学习环境
+### cartpole训练测试
+#### 下载、测试
+克隆仓库并下载依赖、运行测试（先下载uv，mjlab基本都用uv运行）
+```bash
+git clone https://github.com/mujocolab/mjlab.git
+cd mjlab
+uv run demo
+```
+查看器Viser可以直接端口转发出来，在VsCode的**端口**可以直接看到。  
+#### 目录结构
+**模型**
+```
+src/mjlab/asset_zoo/robots/cartpole/
+├── __init__.py              # 空文件，标记为 Python 包
+├── cartpole_constants.py    # 机器人配置与 get_cartpole_robot_cfg()
+└── xmls/
+    └── cartpole.xml         # MuJoCo 模型（小车 + 摆杆 + 速度执行器）
+```
+**任务**
+```
+src/mjlab/tasks/cartpole/
+├── __init__.py    # 注册任务 Mjlab-Cartpole
+├── env_cfg.py     # 环境与 MDP 配置
+└── rl_cfg.py      # PPO 配置
+```
+把本目录下的mjlab_cartpole的文件放到对应目录下。
+
+#### 训练、测试
+在创建完模型和任务后可运行该条查看是否创建成功
+```
+uv run list-envs
+```
+**train**
+```
+uv run python -m mjlab.scripts.train Mjlab-Cartpole --agent.max-iterations 5000
+```
+**play**
+```
+uv run python -m mjlab.scripts.play Mjlab-Cartpole --checkpoint_file <path> --num_envs 4 --viewer viser
+``` 
