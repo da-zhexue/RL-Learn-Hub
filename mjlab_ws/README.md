@@ -110,3 +110,7 @@ uv run python -m mjlab.scripts.play Mjlab-Cartpole --checkpoint_file <path> --nu
   ]
 }
 ```
+再选择.venv的python解释器，如果选不了再在settings.json加上
+```
+"python.useEnvironmentsExtension": false
+```
