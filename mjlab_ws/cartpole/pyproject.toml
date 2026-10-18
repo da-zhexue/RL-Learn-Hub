@@ -1,0 +1,14 @@
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[project]
+name = "cartpole"
+version = "0.1.0"
+requires-python = ">=3.10,<3.15"
+dependencies = ["mjlab"]
+
+# 关键：mjlab 启动时会扫描 "mjlab.tasks" 这组 entry point 并 import 它们，
+# 从而自动执行 cartpole 里的 register_mjlab_task()
+[project.entry-points."mjlab.tasks"]
+cartpole = "cartpole.tasks"
