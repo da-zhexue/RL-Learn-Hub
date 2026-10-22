@@ -12,11 +12,10 @@ go2_issac/assets/*.usd
 go2_issac/assets/*.usda
 go2_issac/assets/*.usdc
 **.zip
-core.*
 **.etli
 tmp.sh
 **.pid
 .pytest_cache/
 .recon/
 fix_log/
-AGENT.md
+#AGENT.md

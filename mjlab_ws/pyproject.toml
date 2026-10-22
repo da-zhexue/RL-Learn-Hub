@@ -5,17 +5,19 @@ requires-python = ">=3.10,<3.15"
 dependencies = [
   "mjlab[cu130]",   # 按你实际的 CUDA 选 cu130 / cu126 / cpu
   "cartpole",
+  "go2",
 ]
 
 [tool.uv]
 package = false     # 根本身不打包，只做 workspace 容器
 
 [tool.uv.workspace]
-members = ["mjlab", "cartpole"]
+members = ["mjlab", "cartpole", "go2"]
 
 [tool.uv.sources]
 mjlab = { workspace = true }
 cartpole = { workspace = true }
+go2 = { workspace = true }
 
 # 以下 index 从 mjlab/pyproject.toml 原样复制到根目录。
 # 注意：workspace 只读取根目录的这类全局配置，成员 pyproject 里的 [tool.uv]
