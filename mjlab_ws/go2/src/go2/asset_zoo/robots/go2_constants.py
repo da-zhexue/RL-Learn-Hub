@@ -23,7 +23,7 @@ def get_spec() -> mujoco.MjSpec:
     for g in spec.geoms:
         if g.name in foot_names or g.contype != 1 or g.conaffinity != 1:
             continue
-        body_name = g.body.name
+        body_name = g.parent.name
         index = counters.get(body_name, 0)
         counters[body_name] = index + 1
         g.name = f"{body_name}_collision_{index}"

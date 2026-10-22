@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from mjlab.envs import ManagerBasedRlEnvCfg, mdp as envs_mdp
 from mjlab.managers.action_manager import ActionTermCfg
 from mjlab.managers.command_manager import CommandTermCfg
@@ -26,6 +28,26 @@ from .terms import TERM_NAMES
 from .terrain import course_spec_fn
 
 
+@dataclass(kw_only=True)
+class Go2EnvCfg(ManagerBasedRlEnvCfg):
+    """Go2 task config with the terrain/observation switches context.py needs.
+
+    These must be real dataclass fields: ``train.py`` rebuilds the config through
+    tyro, which drops attributes assigned dynamically after construction.
+    """
+
+    terrain_variant: str = "full"
+    terrain_scale: float = 1.0
+    privileged: bool = False
+    height_scan: bool = True
+
+    def __post_init__(self) -> None:
+        # Rebuild the course callback from the final field values: train.py parses
+        # the config with tyro, which reconstructs it (calling __post_init__) and
+        # may override terrain_variant/terrain_scale on the command line.
+        self.scene.spec_fn = course_spec_fn(self.terrain_variant, self.terrain_scale)
+
+
 def go2_env_cfg(
     *,
     terrain: str = "full",
@@ -34,10 +56,13 @@ def go2_env_cfg(
     height_scan: bool = True,
     num_envs: int = 8,
     play: bool = False,
-) -> ManagerBasedRlEnvCfg:
+) -> Go2EnvCfg:
     ref = EnvCfg(terrain=terrain, terrain_scale=terrain_scale, privileged=privileged, height_scan=height_scan)
     reward_cfg = RewardCfg()
-    env_spacing = 8.0
+    # mjWarp replicates one model into every world, so each world already gets its
+    # own copy of the single course. Distinct env origins would only shift robots
+    # in that shared model; all-zero origins keep every env on the course.
+    env_spacing = 0.0
 
     feet_ground = ContactSensorCfg(
         name="feet_ground_contact",
@@ -118,10 +143,9 @@ def go2_env_cfg(
         ),
         entities={"robot": get_go2_robot_cfg()},
         sensors=(feet_ground, body_ground),
-        spec_fn=course_spec_fn(num_envs, env_spacing, terrain, terrain_scale),
     )
 
-    cfg = ManagerBasedRlEnvCfg(
+    cfg = Go2EnvCfg(
         scene=scene,
         observations=observations,
         actions=actions,
@@ -130,8 +154,11 @@ def go2_env_cfg(
         rewards=rewards,
         terminations=terminations_cfg,
         sim=SimulationCfg(
-            nconmax=500,
-            njmax=1500,
+            # Per-world capacities: memory is nconmax * njmax * num_envs. 4096
+            # envs with 500/1500 needed >24 GiB; 128/384 keeps a quadruped's
+            # contacts/constraints comfortable at a fraction of the footprint.
+            nconmax=128,
+            njmax=384,
             contact_sensor_maxmatch=512,
             mujoco=MujocoCfg(
                 timestep=ref.sim_dt,
@@ -154,10 +181,13 @@ def go2_env_cfg(
             distance=3.0,
             elevation=-10.0,
             azimuth=90.0,
+            # All env origins coincide now, so "neighbor" envs would render on
+            # top of the tracked robot.
+            max_extra_envs=0,
         ),
+        terrain_variant=terrain,
+        terrain_scale=terrain_scale,
+        privileged=privileged,
+        height_scan=height_scan,
     )
-    cfg.terrain_variant = terrain
-    cfg.terrain_scale = terrain_scale
-    cfg.privileged = privileged
-    cfg.height_scan = height_scan
     return cfg

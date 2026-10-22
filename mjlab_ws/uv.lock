@@ -24,6 +24,7 @@ conflicts = [[
 [manifest]
 members = [
     "cartpole",
+    "go2",
     "mjlab",
     "mjlab-ws",
 ]
@@ -1391,6 +1392,17 @@ wheels = [
 ]
 
 [[package]]
+name = "go2"
+version = "0.1.0"
+source = { editable = "go2" }
+dependencies = [
+    { name = "mjlab" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "mjlab", editable = "mjlab" }]
+
+[[package]]
 name = "googleapis-common-protos"
 version = "1.75.5"
 source = { registry = "https://pypi.org/simple" }
@@ -2378,6 +2390,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "cartpole" },
+    { name = "go2" },
     { name = "mjlab" },
     { name = "mjlab", extra = ["cu130"], marker = "(extra == 'extra-5-mjlab-cpu' and extra == 'extra-5-mjlab-cu126') or (extra != 'extra-5-mjlab-cu126' and extra == 'extra-5-mjlab-cu130') or (extra != 'extra-5-mjlab-cpu' and extra == 'extra-5-mjlab-cu130')" },
 ]
@@ -2385,6 +2398,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cartpole", editable = "cartpole" },
+    { name = "go2", editable = "go2" },
     { name = "mjlab", extras = ["cu130"], editable = "mjlab" },
 ]
 

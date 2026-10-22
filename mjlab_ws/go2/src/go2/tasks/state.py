@@ -29,7 +29,7 @@ def _default_prev(env) -> dict:
         "prev_foot_x": None,
         "foot_air_time": torch.zeros(n, 4, dtype=F64, device=env.device),
         "foot_clear_ema": torch.zeros(n, 4, dtype=F64, device=env.device),
-        "fresh": True,
+        "fresh": torch.ones(n, dtype=torch.bool, device=env.device),
     }
 
 
@@ -217,7 +217,7 @@ def get_state(env) -> core.State:
         foot_air=foot_air,
         foot_air_time=landed_air_time,
         foot_clearance_ema=clear_ema,
-        clearance_target=torch.full_like(terrain_h, ctx.clearance_target),
+        clearance_target=torch.full_like(foot_clearance, ctx.clearance_target),
         height_scan=_height_scan(env, ctx, base_pos, quat),
     )
     env._go2_step_aux = {

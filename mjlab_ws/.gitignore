@@ -1,5 +1,6 @@
 .venv/
 .vscode/
-mjlab/
+mjlab/**
 __pycache__/
 logs/
+MUJOCO_LOG.TXT
