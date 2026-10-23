@@ -150,7 +150,7 @@ uv run python -m mjlab.scripts.train Mjlab-Go2-Full \
     --video True
 
 # 回放最后训好的模型
-uv run python -m mjlab.scripts.play Mjlab-Go2-Full \
-    --checkpoint-file "$(ls -t go2/logs/ppo/go2_ppo/*_repair_s10/model_*.pt | head -1)" \
+uv run python -m mjlab.scripts.play Mjlab-Go2-Steps \
+    --checkpoint-file "go2/logs/ppo/go2_ppo/2026-10-23_01-44-28_steps/model_349.pt" \
     --num-envs 4 \
     --viewer viser
