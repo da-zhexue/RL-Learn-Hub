@@ -79,7 +79,9 @@ class Go2JointPositionAction(ActionTerm):
         )
 
     def apply_actions(self) -> None:
-        q = self._entity.data.joint_pos[:, self._joint_ids].to(torch.float64)
+        # joint_pos_biased 包含 dr.encoder_bias 写入的零位偏差：真实机器人的
+        # PD 环用的也是编码器读数，不是仿真真值。
+        q = self._entity.data.joint_pos_biased[:, self._joint_ids].to(torch.float64)
         dq = self._entity.data.joint_vel[:, self._joint_ids].to(torch.float64)
         tau = self.cfg.kp * (self._target - q) - self.cfg.kd * dq
         tau = torch.clamp(tau, min=self._tau_lo, max=self._tau_hi)

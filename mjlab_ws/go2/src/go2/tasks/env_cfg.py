@@ -23,6 +23,7 @@ from .actions import Go2JointPositionActionCfg
 from .commands import CourseVelocityCommandCfg
 from .config import EnvCfg, RewardCfg
 from .context import FOOT_GEOM_NAMES
+from .dr_cfg import build_dr_events
 from .observations import policy_obs
 from .terms import TERM_NAMES
 from .terrain import course_spec_fn
@@ -40,12 +41,21 @@ class Go2EnvCfg(ManagerBasedRlEnvCfg):
     terrain_scale: float = 1.0
     privileged: bool = False
     height_scan: bool = True
+    dr_scale: float = 1.0
+    """Domain randomization amplitude. 0 disables DR entirely, 1.0 uses the
+    full ranges in ``dr_cfg.py``."""
 
     def __post_init__(self) -> None:
         # Rebuild the course callback from the final field values: train.py parses
         # the config with tyro, which reconstructs it (calling __post_init__) and
         # may override terrain_variant/terrain_scale on the command line.
         self.scene.spec_fn = course_spec_fn(self.terrain_variant, self.terrain_scale)
+        # Same reason as spec_fn: tyro reconstructs the config and may override
+        # dr_scale on the command line, so the DR event terms are rebuilt from
+        # the final value here instead of once in go2_env_cfg().
+        for name in [name for name in self.events if name.startswith("dr_")]:
+            del self.events[name]
+        self.events.update(build_dr_events(self.dr_scale))
 
 
 def go2_env_cfg(
@@ -56,6 +66,7 @@ def go2_env_cfg(
     height_scan: bool = True,
     num_envs: int = 8,
     play: bool = False,
+    dr_scale: float = 1.0,
 ) -> Go2EnvCfg:
     ref = EnvCfg(terrain=terrain, terrain_scale=terrain_scale, privileged=privileged, height_scan=height_scan)
     reward_cfg = RewardCfg()
@@ -189,5 +200,6 @@ def go2_env_cfg(
         terrain_scale=terrain_scale,
         privileged=privileged,
         height_scan=height_scan,
+        dr_scale=dr_scale,
     )
     return cfg

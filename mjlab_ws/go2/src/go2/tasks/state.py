@@ -200,7 +200,9 @@ def get_state(env) -> core.State:
         base_quat=quat,
         base_lin_vel=robot.data.root_link_lin_vel_w.to(F64),
         base_ang_vel=robot.data.root_link_ang_vel_b.to(F64),
-        q=robot.data.joint_pos[:, ctx.joint_ids].to(F64),
+        # 用带编码器零位偏差的读数：dr.encoder_bias 写的是 encoder_bias，
+        # 只有 joint_pos_biased 会把它加进来（策略观测和 PD 控制都该看到偏差）。
+        q=robot.data.joint_pos_biased[:, ctx.joint_ids].to(F64),
         dq=robot.data.joint_vel[:, ctx.joint_ids].to(F64),
         tau=robot.data.actuator_force[:, ctx.actuator_ids].to(F64),
         contact_force=_contact_force(env),

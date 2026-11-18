@@ -115,15 +115,3 @@ uv run python -m mjlab.scripts.play Mjlab-Cartpole --checkpoint_file <path> --nu
 ```
 "python.useEnvironmentsExtension": false
 ```
-
-## Go2 PPO
-
-`go2/` is the mjlab port of the existing `go2_ppo` task. It registers
-`Mjlab-Go2` / `Mjlab-Go2-Full` (full course), `Mjlab-Go2-Steps`, and
-`Mjlab-Go2-Flat`.
-
-```bash
-uv sync
-uv run python -m mjlab.scripts.train Mjlab-Go2 --agent.max-iterations 1465 --log-root logs/go2_ppo
-uv run python -m mjlab.scripts.play Mjlab-Go2 --checkpoint_file <path> --num_envs 1 --viewer viser
-```

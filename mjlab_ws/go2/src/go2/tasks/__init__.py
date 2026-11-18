@@ -12,7 +12,13 @@ def _register(task_id: str, terrain: str) -> None:
         task_id=task_id,
         env_cfg=go2_env_cfg(terrain=terrain, height_scan=True),
         play_env_cfg=go2_env_cfg(
-            terrain=terrain, height_scan=True, num_envs=1, play=True
+            terrain=terrain,
+            height_scan=True,
+            num_envs=1,
+            play=True,
+            # Evaluation should reproduce the trained policy deterministically;
+            # turn DR off unless the user overrides --env.dr-scale when playing.
+            dr_scale=0.0,
         ),
         rl_cfg=go2_ppo_runner_cfg(experiment_name=f"go2_ppo_{terrain}"),
         runner_cls=MjlabOnPolicyRunner,
