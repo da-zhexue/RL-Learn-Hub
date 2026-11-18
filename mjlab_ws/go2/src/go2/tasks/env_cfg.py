@@ -142,6 +142,9 @@ def go2_env_cfg(
         "fallen": TerminationTermCfg(func=terminations.fallen),
         "flipped": TerminationTermCfg(func=terminations.flipped),
         "out_of_course": TerminationTermCfg(func=terminations.out_of_course),
+        # A single numerically unstable env otherwise poisons the whole batch:
+        # rsl_rl aborts the run as soon as any observation contains NaN.
+        "nan": TerminationTermCfg(func=envs_mdp.nan_detection),
     }
 
     scene = SceneCfg(
