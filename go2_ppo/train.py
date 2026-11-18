@@ -47,6 +47,7 @@ from go2_common.config import (  # noqa: E402
     EnvCfg,
     RewardCfg,
     obs_dim,
+    scene_for_config,
     to_jsonable,
 )
 from go2_common.terrain import TERRAINS  # noqa: E402
@@ -256,10 +257,13 @@ def main(argv=None):
     if args.checkpoint_freq is not None:
         train_cfg.checkpoint_freq = args.checkpoint_freq
 
-    # 把配置落盘：play.py 靠它还原环境，避免观测维度和奖励权重对不上
+    # 把配置落盘：play.py 靠它还原环境，避免观测维度和奖励权重对不上。
+    # scene 存**仓库相对路径**：仓库目录改名/搬到别的机器后，旧 config.json 仍能解析（见 train_utils）
+    env_json = to_jsonable(env_cfg)
+    env_json["scene"] = scene_for_config(env_cfg.scene)
     with open(run_dir / CONFIG_NAME, "w", encoding="utf-8") as f:
         json.dump(
-            {"env": to_jsonable(env_cfg), "reward": to_jsonable(reward_cfg), "train": to_jsonable(train_cfg)},
+            {"env": env_json, "reward": to_jsonable(reward_cfg), "train": to_jsonable(train_cfg)},
             f, indent=2, ensure_ascii=False,
         )
     rollout_batch = train_cfg.n_steps * args.n_envs

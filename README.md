@@ -62,7 +62,7 @@ nano ~/.bashrc
 写入：export ROS_DOMAIN_ID=1
 nano unitree_ros2/setup_local.sh
 修改：source /opt/ros/humble/setup.bash
-修改：source $HOME/unitree/unitree_ros2/install/setup.bash # 自己放仓库的路径
+修改：source $HOME/robotics/unitree_ros2/install/setup.bash # 自己放仓库的路径
 nano unitree_mujoco/simulate_python/config.py
 修改：USE_JOYSTICK = 0 # 为1时需要外接手柄才能启动
 ```
@@ -188,7 +188,7 @@ bash sac_train.sh
 
 #### 训练过程查看
 ```
-tensorboard --logdir /path/to/unitree/runs
+tensorboard --logdir /path/to/robotics/runs
 ```
 
 ### 回放

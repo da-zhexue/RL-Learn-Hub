@@ -15,7 +15,7 @@
 ## 1. Repository Structure
 
 ```text
-/home/lin/unitree/
+{repo-root}/            # 随 clone 位置/目录名变化，下面都是仓库内相对路径
 ├── go2_common/           Algorithm-independent shared layer for SAC / PPO (ONE implementation)
 │   ├── config.py         Constants, EnvCfg/RewardCfg, quat_to_rpy/projected_gravity (no mujoco import)
 │   ├── terrain.py        Curriculum variants (build_model), terrain heights (TerrainHeight), criteria

@@ -170,7 +170,7 @@ def main(argv=None) -> int:
     from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
     from rsl_rl.runners import OnPolicyRunner
 
-    from go2_common.config import MODELS_DIR, RewardCfg, to_jsonable
+    from go2_common.config import MODELS_DIR, RewardCfg, scene_for_config, to_jsonable
     from go2_issac import env_cfg as ec
     from go2_issac.agents import Go2IsaacPPORunnerCfg, iterations_for, mini_batches
     from go2_issac.mdp import metrics
@@ -231,11 +231,14 @@ def main(argv=None) -> int:
             // max(1, agent_cfg.algorithm.num_mini_batches)),
         "seed": args.seed,
     }
+    env_json = to_jsonable(cfg.to_go2_env_cfg())
+    # 和 go2_sac / go2_ppo 的写法保持同构：scene 存仓库相对路径（仓库改名/迁移后仍能解析）
+    env_json["scene"] = scene_for_config(env_json["scene"])
     (run_dir / "config.json").write_text(
         json.dumps(
             {
                 "sim": "isaac",
-                "env": to_jsonable(cfg.to_go2_env_cfg()),
+                "env": env_json,
                 "reward": to_jsonable(RewardCfg()),
                 "train": train_meta,
             },

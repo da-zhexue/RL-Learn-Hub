@@ -22,6 +22,41 @@ MODELS_DIR = REPO_ROOT / "models"
 RUNS_DIR = REPO_ROOT / "runs"
 CTRL_DIR = REPO_ROOT / "ctrl"
 
+
+def resolve_scene_path(scene: str) -> str:
+    """把 `config.json` / `--scene` 里存的场景路径解析成本机可用路径。
+
+    兼容两种写法：
+    - 绝对路径：旧 `config.json`、命令行显式给的；
+    - **仓库相对路径**（`unitree_mujoco/unitree_robots/go2/scene.xml`，推荐）：仓库目录改名、
+      搬到别的机器后都不用改 `config.json`。
+
+    原路径不存在时回退到本仓库的 `DEFAULT_SCENE`；都不存在就原样返回，让 mujoco 自己报错。
+    """
+    path = Path(scene)
+    candidates = [path] if path.is_absolute() else [REPO_ROOT / path]
+    candidates.append(Path(DEFAULT_SCENE))
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return str(scene)
+
+
+def scene_for_config(scene: str) -> str:
+    """把场景路径转成写进 `config.json` 的形式：仓库内的存成仓库相对路径。
+
+    这样仓库目录改名/迁移后，旧 `config.json` 仍能按新位置解析（配对 `resolve_scene_path`）。
+    仓库外的路径（`--scene` 指到别的目录）原样保留。
+    """
+    path = Path(scene)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return str(scene)
+
+
 # ------------------------------------------------------------------ 常量
 
 DEFAULT_Q = np.array([0.0, 0.9, -1.8] * 4, dtype=np.float64)

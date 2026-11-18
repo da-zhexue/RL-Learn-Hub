@@ -67,7 +67,7 @@ cd ~/IsaacLab && ./isaaclab.sh -i rsl_rl
 ```bash
 docker run --name isaac-lab --gpus all -it --rm \
   -e ACCEPT_EULA=Y -e PRIVACY_CONSENT=Y \
-  -v /path/to/unitree:/workspace/unitree \
+  -v /path/to/robotics:/workspace/robotics \
   nvcr.io/nvidia/isaac-lab:2.3.0
 ```
 
@@ -90,7 +90,7 @@ docker run --name isaac-lab --gpus all -it --rm \
 ### 把整个仓库搬过去
 
 `go2_issac` 要 import `go2_common`（配置唯一来源）和 `go2_ppo.config`（超参来源），
-所以**整个 `unitree/` 目录一起搬**，别只拷 `go2_issac/`。
+所以**整个仓库目录一起搬**，别只拷 `go2_issac/`。
 
 那台机器上**不需要装** mujoco / stable-baselines3 —— 训练回路一行都不碰它们。
 （`assets/*.py` 要 mujoco，但那两个脚本是在当前这台机器上跑的，产物已经进 git 了。）
